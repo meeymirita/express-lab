@@ -1,8 +1,8 @@
 slug: express-lab
 title: Node.js и Express
 subtitle: Node с нуля, event loop, streams, Express 5, ошибки и валидация, PostgreSQL и Prisma, JWT-аутентификация, файлы и share-ссылки, тесты и Docker. Сквозной проект ShareBox — файлообменник со ссылками.
-accent: #2563eb
-planned: ~42 ч
+accent: #52D12E
+planned: ~44 ч
 ---
 Это практический курс по **Node.js** и **Express**: ты не обязана ничего знать о Node, а к последней сессии собираешь свой защищённый, протестированный Express-сервис — и понимаешь, что из этого потом автоматизирует NestJS.
 
