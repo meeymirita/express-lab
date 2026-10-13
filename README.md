@@ -9,7 +9,7 @@
 
 ## Что внутри
 
-- **11 сессий, 66 шагов, ~42 часа.** Node и V8, модули, event loop, streams → Express 5: роутер, middleware, тело запроса → ошибки, zod, слои routes/controllers/services, `.env` → PostgreSQL: `pg`, SQL, транзакции → Prisma 7: схема, миграции, клиент → JWT-аутентификация, ротация refresh, владение ресурсом → файлы: `multer`, лимиты, path traversal, Range → share-ссылки, HTML-страница скачивания, скачивание из консоли → админка, rate limit, helmet/cors/pino, graceful shutdown → тесты (`node:test`, supertest), Docker, финал.
+- **11 сессий, 66 шагов, ~44 часа.** Node и V8, модули, event loop, streams → Express 5: роутер, middleware, тело запроса → ошибки, zod, слои routes/controllers/services, `.env` → PostgreSQL: `pg`, SQL, транзакции → Prisma 7: схема, миграции, клиент → JWT-аутентификация, ротация refresh, владение ресурсом → файлы: `multer`, лимиты, path traversal, Range → share-ссылки, HTML-страница скачивания, скачивание из консоли → админка, rate limit, helmet/cors/pino, graceful shutdown → тесты (`node:test`, supertest), Docker, финал.
 - В нескольких сессиях — шаг «🔨 Сломать → починить», в сессии 11 — «Production Hell» без подсказок.
 - Справка: шпаргалка, справочник ошибок (симптом → причина → что делать), глоссарий (35 терминов), 38 вопросов на собеседование, «что дальше».
 - Режим: самостоятельная лаба. Node нужен на Mac с сессии 1; PostgreSQL в Docker — с сессии 5, только с согласия.
