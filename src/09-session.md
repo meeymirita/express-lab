@@ -1,150 +1,18 @@
-# Сессия 9 · Share-ссылки и консоль
+# Сессия 9 · Express 5
 dur: ~4 ч
 
-## 9.1 Код ссылки и создание share | short: Код ссылки | est: ~25 мин
+## 9.1 Зачем Express, если есть node:http | short: Зачем Express | est: ~15 мин
 ### intro
-**Слова шага:** *код ссылки* — короткий случайный идентификатор в адресе ссылки; `nanoid` — генератор таких строк; `POST /shares` — роут создания share-ссылки на файл (`fileId` — в теле запроса).
+**Слова шага:** *фреймворк* — готовый каркас поверх `node:http`, берёт на себя рутину; *роутер (router)* — сопоставление «метод + адрес → функция»; *middleware* — функция, встраиваемая в цепочку обработки запроса (кратко, подробно в 3.4).
 
-Делиться файлом — не значит отдавать его `id` из базы (последовательный, легко перебрать). Нужен отдельный короткий случайный **код** — то, что видно в адресе `/s/<код>`.
+В сессии 1 ты написала сервер на `node:http` целиком руками: один обработчик, внутри — `if` на каждый адрес. На десять адресов это превратится в нечитаемую стену `if`. **Express** — не замена `node:http`, а надстройка над ним: он сам создаёт `http`-сервер внутри, а тебе даёт **роутер** (сопоставление «метод + адрес → функция») и **middleware** — функции, которые можно вставить в цепочку обработки запроса.
 
-**Файлы:** `src/services/shares.service.js`, `nanoid-demo.js`.
+Поставим Express 5 и посмотрим на его версию:
 
 ```bash run
 cd /work/sharebox
-npm install nanoid
-cat > src/services/shares.service.js <<'EOF'
-import { nanoid } from 'nanoid'
-import { prisma } from '../prisma.js'
-import { AppError } from '../../lib/errors.js'
-
-export async function createShare(fileId, ownerId, { expiresInHours, downloadLimit, password } = {}) {
-  const file = await prisma.file.findUnique({ where: { id: fileId } })
-  if (!file || file.ownerId !== ownerId) throw new AppError('файл не найден или не твой', 403)
-  const expiresAt = expiresInHours ? new Date(Date.now() + expiresInHours * 3600 * 1000) : null
-  return prisma.share.create({
-    data: {
-      fileId,
-      code: nanoid(8),
-      expiresAt,
-      downloadLimit: downloadLimit || null,
-    },
-  })
-}
-EOF
-cat > nanoid-demo.js <<'EOF'
-import { nanoid } from 'nanoid'
-console.log(nanoid(8), nanoid(8), nanoid(8))
-EOF
-node nanoid-demo.js
-```
-
-**Разбор.** `nanoid(8)` — короткий случайный id из URL-безопасных символов (без `+`, `/`, как у base64) — удобно вставлять прямо в адрес. `expiresInHours` переводится в точную дату `expiresAt` **в момент создания**, а не хранится как «через сколько часов» — проверка истечения (шаг 9.2) тогда просто сравнивает с текущим временем, без пересчётов.
-
-### result
-```out auto
-```
-
-### why
-Код ссылки `nanoid(8)` — это ~218 триллионов комбинаций, перебором не угадать за разумное время; `id` файла из базы (1, 2, 3...) — наоборот, тривиально перебрать. Share-ссылка всегда отдельная сущность от самого файла: один файл может иметь несколько ссылок с разными сроками и лимитами (разным людям — разные условия).
-
-### deep Если не получилось
-- **`Cannot find module 'nanoid'`** — `npm install nanoid` не выполнен; версии 4+ — чистый ESM, `import { nanoid }`, без `require`.
-- **`expiresAt` — не дата, а `NaN`** — `expiresInHours` передан строкой вместо числа; `req.body` всегда присылает JSON-типы как есть, но стоит валидировать zod-схемой (как в сессии 4), если данные приходят от клиента.
-
-### quiz
-- Почему код share-ссылки — отдельное случайное значение, а не просто `id` файла?
-- Как `expiresInHours` превращается в `expiresAt`, и почему это делается один раз при создании, а не каждый раз при проверке?
-- Может ли у одного файла быть несколько share-ссылок одновременно?
-
-### links
-- https://github.com/ai/nanoid#readme | nanoid, как устроен | nanoid: README
-
-## 9.2 Срок жизни, лимит скачиваний, 410 Gone | short: Срок и лимит | est: ~30 мин
-### intro
-**Слова шага:** `410 Gone` — код ответа «было, но больше недоступно»; *истёкшая ссылка* — share-ссылка с истёкшим сроком действия; *исчерпанный лимит* — ссылка, которую скачали уже максимум разрешённых раз; `downloadsCount` — счётчик скачиваний ссылки в базе.
-
-Проверка при переходе по ссылке: существует ли код, не истёк ли срок, не исчерпан ли лимит скачиваний. **`410 Gone`** — специальный код именно для «было, но больше недоступно» (в отличие от `404 Not Found` — «никогда не было»).
-
-**Файлы:** `src/services/shares.service.js` (дописать), `shares-logic-demo.js`.
-
-```bash run
-cat >> src/services/shares.service.js <<'EOF'
-
-export async function resolveShare(code) {
-  const share = await prisma.share.findUnique({ where: { code }, include: { file: true } })
-  if (!share) {
-    const { NotFoundError } = await import('../../lib/errors.js')
-    throw new NotFoundError('ссылка не найдена')
-  }
-  if (share.expiresAt && share.expiresAt < new Date()) {
-    throw new AppError('срок действия ссылки истёк', 410)
-  }
-  if (share.downloadLimit && share.downloadsCount >= share.downloadLimit) {
-    throw new AppError('лимит скачиваний исчерпан', 410)
-  }
-  return share
-}
-
-export async function registerDownload(shareId) {
-  await prisma.share.update({ where: { id: shareId }, data: { downloadsCount: { increment: 1 } } })
-}
-EOF
-cat > shares-logic-demo.js <<'EOF'
-const now = new Date()
-const pastExpiry = new Date(now.getTime() - 3600 * 1000)
-const futureExpiry = new Date(now.getTime() + 3600 * 1000)
-console.log('просроченная ссылка:', pastExpiry < now)
-console.log('ещё живая ссылка:', futureExpiry < now)
-EOF
-node shares-logic-demo.js
-```
-
-**Разбор.** `downloadsCount: { increment: 1 }` — атомарная операция на уровне базы («увеличь текущее значение на 1»), а не «прочитать, прибавить в JS, записать обратно» — последнее подвержено гонке при двух одновременных скачиваниях (сессия 2: несколько запросов могут выполняться «одновременно» с точки зрения клиента). `resolveShare` — одна функция, которую вызовут и для скачивания (9.5), и для HTML-страницы (9.4): логика проверки в одном месте.
-
-### result
-```out auto
-```
-
-### why
-`410` вместо `404` для истёкшей ссылки — не просто вежливость: клиентский код (или человек, читающий ответ) по коду понимает, что ссылка **была** валидна, просто время/лимит вышли — это другая ситуация, чем «опечатка в адресе».
-
-### deep Если не получилось
-- **Гонка при одновременных скачиваниях увеличивает счётчик неправильно** — если вместо `{ increment: 1 }` писать `downloadsCount: share.downloadsCount + 1`, два параллельных запроса могут оба прочитать одно и то же старое значение и оба прибавить к нему по 1 — итог `+1`, а не `+2`; `increment` в Prisma превращается в SQL `downloads_count = downloads_count + 1`, выполняемый самой базой атомарно.
-
-### quiz
-- Чем `410 Gone` концептуально отличается от `404 Not Found`?
-- Почему `downloadsCount: { increment: 1 }` безопаснее, чем прочитать значение в JS и прибавить единицу?
-- Что проверяется раньше — срок действия или лимит скачиваний, и важен ли этот порядок?
-
-### links
-- https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/410 | код ответа 410 | MDN: 410 Gone
-
-## 9.3 Пароль на ссылку | short: Пароль на ссылку | est: ~20 мин
-### intro
-**Слова шага:** *опциональный пароль* — share-ссылка может быть без пароля (открыта всем) или с паролем; `401` при неверном пароле на скачивание — код ответа, если пароль не подошёл.
-
-Share-ссылка может быть с паролем — тем же способом хеширования, что и пароль пользователя (сессия 7, argon2), только отдельное поле `passwordHash` у `Share`, не у `User`.
-
-**Файлы:** `src/services/shares.service.js` (дописать), `share-password-demo.js`.
-
-```bash run
-cat >> src/services/shares.service.js <<'EOF'
-
-export async function checkSharePassword(share, providedPassword) {
-  if (!share.passwordHash) return true
-  if (!providedPassword) return false
-  const argon2 = (await import('argon2')).default
-  return argon2.verify(share.passwordHash, providedPassword)
-}
-EOF
-cat > share-password-demo.js <<'EOF'
-import argon2 from 'argon2'
-
-const passwordHash = await argon2.hash('letmein')
-console.log('верный пароль:', await argon2.verify(passwordHash, 'letmein'))
-console.log('неверный пароль:', await argon2.verify(passwordHash, 'guess'))
-EOF
-node share-password-demo.js
+npm install express@5
+node -e "console.log(require('express/package.json').version)"
 ```
 
 ### result
@@ -152,189 +20,110 @@ node share-password-demo.js
 ```
 
 ### why
-Пароль на ссылку — независимая возможность от пароля аккаунта: получатель файла может вообще не иметь аккаунта ShareBox (паспорт лабы: «получателю аккаунт не нужен, если ссылка публичная»), но для чувствительного файла автор может потребовать пароль именно на эту ссылку.
+Эта сессия — главная причина, зачем в принципе существует эта лаба: дальше 9 сессий (авторизация, файлы, share-ссылки, админка) — это всё middleware и роуты поверх одного и того же `app`, созданного сегодня.
+
+### deep Как ещё можно
+Альтернативы Express — `Fastify` (быстрее, строже со схемами) и `Koa` (от тех же авторов, что и Express, но async-first). Express выбран для лабы, потому что он до сих пор самый распространённый и на нём держится NestJS изнутри (режим `platform-express`).
 
 ### deep Если не получилось
-- **`checkSharePassword` всегда возвращает `true`** — `share.passwordHash` пустой (`null`), если пароль не задавался при создании ссылки (шаг 9.1 это поддерживает как опциональный параметр) — поведение правильное: без пароля ссылка открыта всем.
+- **`npm error code ERESOLVE`** — конфликт версий зависимостей; обычно помогает `npm install express@5 --save-exact`, чтобы зафиксировать точную версию.
+- **`Cannot find module 'express'`** — `npm install` выполнен не в папке `/work/sharebox` (где `package.json`); сверь `pwd`.
 
 ### quiz
-- Чем пароль на ссылку отличается от пароля пользователя из сессии 7 с точки зрения модели данных?
-- Что вернёт `checkSharePassword`, если у ссылки нет пароля вообще?
-- Каким алгоритмом хешируется пароль ссылки?
+- Express заменяет `node:http` или работает поверх него?
+- Что из написанного в сессии 1 руками (роутинг через `if`) возьмёт на себя Express?
+- Почему версия зафиксирована как `express@5`, а не просто `express`?
 
 ### links
-- https://www.npmjs.com/package/argon2 | argon2, ещё раз для повторения | npm: argon2
+- https://expressjs.com/en/guide/routing.html | роутинг в Express | Express: Routing
 
-## 9.4 HTML-страница скачивания | short: Страница скачивания | est: ~30 мин
+## 9.2 Роутер: req, res, параметры, query | short: Роутер | est: ~30 мин
 ### intro
-**Слова шага:** *рендер HTML без шаблонизатора* — страница собирается обычной шаблонной строкой JS, без отдельного движка вроде EJS; `res.send` — отправить готовую HTML-строку клиенту; *форма пароля* — `<form>` на странице скачивания, если у ссылки есть пароль.
+**Слова шага:** `app.get`/`app.post` — зарегистрировать обработчик на метод и путь; `req` — объект запроса (что прислал клиент); `res` — объект ответа (что отправить клиенту); *параметр пути* — часть адреса вида `:id`; *query-строка* — часть адреса после `?`.
 
-Получатель переходит по `/s/:code` в браузере — ему нужна простая HTML-страница, не JSON. Без фреймворка шаблонов (за пределами паспорта лабы — «клиент в Vue/Nuxt-лабах») — достаточно строки с HTML:
+Каркас приложения — объект `app`, у него методы `.get()`, `.post()` и т. д. по HTTP-методам; у каждого — путь и функция-обработчик `(req, res) => {...}`. Соберём каркас ShareBox поверх вчерашнего `server.js`:
 
-**Файл:** `src/controllers/shares.controller.js`.
+**Файл:** `server.js`.
 
 ```bash run
-cat > src/controllers/shares.controller.js <<'EOF'
-import { createShare, resolveShare, checkSharePassword } from '../services/shares.service.js'
+cat > server.js <<'EOF'
+import express from 'express'
 
-export async function postShare(req, res) {
-  const share = await createShare(req.body.fileId, req.user.id, req.body)
-  res.status(201).json({ code: share.code, url: `/s/${share.code}` })
-}
+const app = express()
 
-export async function getSharePage(req, res) {
-  const share = await resolveShare(req.params.code)
-  if (share.passwordHash) {
-    return res.send(`<!doctype html>
-<meta charset="utf-8">
-<h1>${share.file.name}</h1>
-<form method="POST" action="/s/${share.code}/download">
-  <input type="password" name="password" placeholder="Пароль от ссылки">
-  <button type="submit">Скачать</button>
-</form>`)
-  }
-  res.send(`<!doctype html>
-<meta charset="utf-8">
-<h1>${share.file.name}</h1>
-<p>Размер: ${share.file.sizeBytes} байт</p>
-<a href="/s/${share.code}/download">Скачать</a>`)
-}
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() })
+})
+
+app.get('/files/:id', (req, res) => {
+  res.json({ id: req.params.id, note: 'заглушка — файл появится в сессии 15' })
+})
+
+app.get('/search', (req, res) => {
+  res.json({ query: req.query.q || null, page: Number(req.query.page) || 1 })
+})
+
+const PORT = process.env.PORT || 3000
+app.listen(PORT, () => console.log(`ShareBox (Express) слушает порт ${PORT}`))
 EOF
-echo "контроллер страницы готов; роуты и проверка запуском — в шаге 9.5 вместе со скачиванием"
-```
-
-### result
-```out
-(контроллер создан; проверка запуском — в 9.5)
-```
-
-### why
-`res.send(строка)` — Express сам определяет `Content-Type: text/html` по содержимому строки (начинается с `<`); для JSON использовался `res.json`, здесь — обычный HTML-текст. Форма с паролем — простейший вариант без JavaScript на странице: обычная `<form method="POST">`, которую поймёт роут скачивания (следующий шаг).
-
-### deep Если не получилось
-- **На странице видно `${share.file.name}` буквально** — используются не те кавычки; шаблонная строка JS требует обратных кавычек `` ` ``, а не обычных `'` или `"`.
-- **`share.file` — `undefined`** — `resolveShare` должен делать `include: { file: true }` при поиске (шаг 9.2); без этого в `share` нет связанного файла.
-
-### quiz
-- Как Express понимает, что отдавать в `Content-Type` — JSON или HTML?
-- Что отличает страницу со ссылкой с паролем от страницы без пароля в этом коде?
-- Какой HTTP-метод указан у формы ввода пароля и почему не GET?
-
-### links
-- https://expressjs.com/en/api.html#res.send | справочник по res.send | Express: res.send
-
-## 9.5 Скачивание по share-коду | short: GET /s/:code/download | est: ~30 мин
-### intro
-**Слова шага:** *сборка всех шагов сессии* — шаги 9.1–9.4 собираются в рабочие роуты одним файлом; *счётчик скачиваний на лету* — `downloadsCount` увеличивается прямо при скачивании, атомарно в базе.
-
-Соберём 9.1–9.4 в рабочие роуты: страница, форма с паролем, само скачивание потоком (сессия 8) с увеличением счётчика.
-
-Соберём сервис и контроллер **целиком** — одним чистым файлом каждый, вместо накопленных за шаги 9.1–9.4 добавлений:
-
-**Файлы:** `src/services/shares.service.js`, `src/controllers/shares.controller.js`, `src/routes/shares.routes.js`.
-
-```bash run
-cat > src/services/shares.service.js <<'EOF'
-import { nanoid } from 'nanoid'
-import argon2 from 'argon2'
-import { prisma } from '../prisma.js'
-import { AppError, NotFoundError } from '../../lib/errors.js'
-
-export async function createShare(fileId, ownerId, { expiresInHours, downloadLimit, password } = {}) {
-  const file = await prisma.file.findUnique({ where: { id: fileId } })
-  if (!file || file.ownerId !== ownerId) throw new AppError('файл не найден или не твой', 403)
-  const expiresAt = expiresInHours ? new Date(Date.now() + expiresInHours * 3600 * 1000) : null
-  const passwordHash = password ? await argon2.hash(password) : null
-  return prisma.share.create({
-    data: { fileId, code: nanoid(8), expiresAt, downloadLimit: downloadLimit || null, passwordHash },
-  })
-}
-
-export async function resolveShare(code) {
-  const share = await prisma.share.findUnique({ where: { code }, include: { file: true } })
-  if (!share) throw new NotFoundError('ссылка не найдена')
-  if (share.expiresAt && share.expiresAt < new Date()) throw new AppError('срок действия ссылки истёк', 410)
-  if (share.downloadLimit && share.downloadsCount >= share.downloadLimit) {
-    throw new AppError('лимит скачиваний исчерпан', 410)
-  }
-  return share
-}
-
-export async function checkSharePassword(share, providedPassword) {
-  if (!share.passwordHash) return true
-  if (!providedPassword) return false
-  return argon2.verify(share.passwordHash, providedPassword)
-}
-
-export async function registerDownload(shareId) {
-  await prisma.share.update({ where: { id: shareId }, data: { downloadsCount: { increment: 1 } } })
-}
-EOF
-cat > src/controllers/shares.controller.js <<'EOF'
-import { createReadStream } from 'node:fs'
-import { createShare, resolveShare, checkSharePassword, registerDownload } from '../services/shares.service.js'
-
-export async function postShare(req, res) {
-  const share = await createShare(req.body.fileId, req.user.id, req.body)
-  res.status(201).json({ code: share.code, url: `/s/${share.code}` })
-}
-
-export async function getSharePage(req, res) {
-  const share = await resolveShare(req.params.code)
-  if (share.passwordHash) {
-    return res.send(`<!doctype html>
-<meta charset="utf-8">
-<h1>${share.file.name}</h1>
-<form method="POST" action="/s/${share.code}/download">
-  <input type="password" name="password" placeholder="Пароль от ссылки">
-  <button type="submit">Скачать</button>
-</form>`)
-  }
-  res.send(`<!doctype html>
-<meta charset="utf-8">
-<h1>${share.file.name}</h1>
-<p>Размер: ${share.file.sizeBytes} байт</p>
-<a href="/s/${share.code}/download">Скачать</a>`)
-}
-
-export async function downloadByShare(req, res) {
-  const share = await resolveShare(req.params.code)
-  const ok = await checkSharePassword(share, req.body?.password)
-  if (!ok) return res.status(401).send('Неверный пароль')
-  await registerDownload(share.id)
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(share.file.name)}"`)
-  createReadStream(share.file.storedPath).pipe(res)
-}
-EOF
-cat > src/routes/shares.routes.js <<'EOF'
-import { Router } from 'express'
-import { postShare, getSharePage, downloadByShare } from '../controllers/shares.controller.js'
-import { requireAuth } from '../../lib/auth-middleware.js'
-
-const router = Router()
-router.post('/shares', requireAuth, postShare)
-router.get('/s/:code', getSharePage)
-router.post('/s/:code/download', downloadByShare)
-router.get('/s/:code/download', downloadByShare)
-export default router
-EOF
-sed -i.bak "/import authRoutes/a import sharesRoutes from './src/routes/shares.routes.js'" server.js
-sed -i.bak "/app.use(authRoutes)/a app.use(sharesRoutes)" server.js
-rm -f server.js.bak
 node server.js &
 SERVER_PID=$!
-sleep 2
-EMAIL="sharer-$(date +%s)@mail.com"
-curl -s -X POST http://localhost:3000/auth/register -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"supersecret123\"}" > /dev/null
-TOKEN=$(curl -s -X POST http://localhost:3000/auth/login -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"supersecret123\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).access))")
-echo "файл для шаринга" > share-me.txt
-UPLOAD=$(curl -s -F "file=@share-me.txt;type=text/plain" -H "Authorization: Bearer $TOKEN" http://localhost:3000/files)
-FILE_ID=$(echo "$UPLOAD" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).id))")
-SHARE=$(curl -s -X POST http://localhost:3000/shares -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "{\"fileId\":$FILE_ID}")
-echo "$SHARE"
-CODE=$(echo "$SHARE" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).code))")
-curl -s http://localhost:3000/s/$CODE | head -3
-curl -s http://localhost:3000/s/$CODE/download
+sleep 1
+curl -s http://localhost:3000/health
+echo
+curl -s http://localhost:3000/files/abc123
+echo
+curl -s "http://localhost:3000/search?q=report&page=2"
+echo
+kill $SERVER_PID
+```
+
+**Разбор.** `:id` в пути — **параметр**: кусок адреса попадает в `req.params.id`. `?q=report&page=2` — **query-строка**, доступна целиком в `req.query` как объект. `res.json(...)` сам выставляет заголовок `Content-Type: application/json` и сериализует объект — в сессии 1 это делалось руками через `JSON.stringify` и `writeHead`.
+
+### result
+```out auto
+```
+
+### why
+`req.params` и `req.query` — это 90% того, откуда роут берёт входные данные (третий источник — тело запроса, следующий шаг). Share-ссылка в сессии 16 будет устроена ровно так: `/s/:code` — код из `req.params`.
+
+### deep Если не получилось
+- **`Cannot GET /files/abc123`** — путь не совпал: Express ищет точное совпадение метода и шаблона; сверь, что не перепутаны `/files/:id` и `/file/:id`.
+- **`req.query.page` — строка, а не число** — всё в query всегда строка; `Number(...)` в примере — обязательное приведение типа, иначе `page + 1` даст `'21'`, а не `3`.
+
+### quiz
+- Чем `req.params` отличается от `req.query`?
+- Что вернёт `req.params.id` для запроса `GET /files/xyz`?
+- Почему `req.query.page` нужно оборачивать в `Number(...)`?
+
+### links
+- https://expressjs.com/en/api.html#req | справочник по req | Express: Request
+- https://expressjs.com/en/api.html#res | справочник по res | Express: Response
+
+## 9.3 Тело запроса: express.json() | short: express.json() | est: ~20 мин
+### intro
+**Слова шага:** *тело запроса (body)* — данные, которые клиент присылает вместе с запросом; `express.json()` — middleware, которое разбирает JSON-тело в `req.body`; `Content-Type` — заголовок, которым клиент объявляет формат тела; `POST` — метод, которым обычно присылают тело.
+
+`GET`-запрос обычно без тела — все данные в пути и query. `POST`/`PUT` присылают **тело** — например, JSON с данными формы. Но Express **не читает** его сам: тело приходит как поток байтов (сессия 2!), и нужен встроенный middleware `express.json()`, который этот поток дочитает и положит готовый объект в `req.body`.
+
+**Файл:** `server.js` (дописать).
+
+```bash run
+cat >> server.js <<'EOF'
+
+app.use(express.json())
+
+app.post('/echo', (req, res) => {
+  res.json({ получено: req.body })
+})
+EOF
+node server.js &
+SERVER_PID=$!
+sleep 1
+curl -s -X POST http://localhost:3000/echo -H 'Content-Type: application/json' -d '{"name":"ShareBox"}'
+echo
+curl -s -X POST http://localhost:3000/echo -d '{"name":"без заголовка"}'
+echo
 kill $SERVER_PID
 ```
 
@@ -343,76 +132,221 @@ kill $SERVER_PID
 ```
 
 ### why
-Это первый сквозной путь ShareBox целиком: регистрация → вход → загрузка → создание ссылки → переход по ссылке → скачивание. Всё, что писалось в сессиях 1–9 порознь, здесь впервые работает вместе.
+Второй `curl` без заголовка `Content-Type: application/json` показывает, почему заголовок обязателен: `express.json()` смотрит именно на него, чтобы понять, что тело — JSON, а не что-то другое (файл, форма); без него `req.body` останется пустым объектом. Регистрация формы и загрузка файлов (сессии 14–15) — это `POST`/`PUT` с телом, тот же механизм.
 
 ### deep Если не получилось
-- **`downloadByShare` не увеличивает счётчик** — `registerDownload` должен вызываться **после** успешной проверки пароля, но **до** отдачи файла — если поставить после `pipe(res)`, поток уже начал отправку, а код может не успеть выполниться до завершения запроса.
-- **GET и POST на одном пути `/s/:code/download`** — сделаны оба специально: GET — для ссылки без пароля (прямая ссылка на скачивание), POST — для формы с паролем из шага 9.4.
+- **`req.body` — `undefined`** — `app.use(express.json())` не вызван, или вызван **после** роута, который его использует; порядок `app.use(...)` важен — разберём в следующем шаге.
+- **`SyntaxError: Unexpected token`** — невалидный JSON в `-d`; экранирование кавычек в терминале — частый источник ошибки, сверь с примером дословно.
 
 ### quiz
-- Перечисли по шагам весь путь от регистрации до успешного скачивания файла по ссылке.
-- Почему `registerDownload` вызывается до `pipe(res)`, а не после?
-- Зачем на `/s/:code/download` зарегистрированы и GET, и POST?
+- Почему Express не читает тело запроса сам по себе, без `express.json()`?
+- Что произойдёт с `req.body`, если не прислать заголовок `Content-Type: application/json`?
+- Какой запрос обычно присылает тело — `GET` или `POST`?
 
 ### links
-- https://expressjs.com/en/guide/routing.html | роутинг, финальное повторение | Express: Routing
+- https://expressjs.com/en/api.html#express.json | справочник по express.json() | Express: express.json()
 
-## 9.6 Скачивание из консоли с нуля | short: curl, wget, докачка | est: ~25 мин
+## 9.4 Middleware и порядок | short: Middleware | est: ~30 мин
 ### intro
-**Слова шага:** `curl -O` — скачать и сохранить под именем с сервера; `wget -c` — скачать с докачкой при повторном запуске; `curl -C -` — докачать файл, сама вычислив, с какого байта; `sha256sum` — посчитать контрольную сумму файла; *PowerShell `Invoke-WebRequest`* — аналог `curl`/`wget` на Windows.
+**Слова шага:** *middleware* — функция `(req, res, next)`, которая выполняется до или вместо роута; `app.use` — подключить middleware; `next()` — передать управление дальше по цепочке; *цепочка обработки* — порядок, в котором Express вызывает middleware и роуты.
 
-Получатель ShareBox не обязан открывать браузер — ссылку можно скачать прямо из консоли. Это пригодится и для проверки собственного сервиса.
+**Middleware** — функция `(req, res, next) => {...}`, которую Express вызывает **до** (или вместо) обработчика роута. `express.json()` из прошлого шага — middleware. Напишем свою — счётчик запросов и лог:
 
-```bash
-curl -O http://localhost:3000/s/КОД/download
-wget http://localhost:3000/s/КОД/download
-```
-
-```bash
-curl -C - -O http://localhost:3000/s/КОД/download
-wget -c http://localhost:3000/s/КОД/download
-```
-
-На Windows без `curl`/`wget` — PowerShell:
-
-```powershell
-Invoke-WebRequest -Uri "http://localhost:3000/s/КОД/download" -OutFile "файл.bin"
-```
-
-Проверить, что скачанный файл — ровно тот же, что был загружен (данные не повредились при передаче), сверяют **контрольной суммой**:
+**Файл:** `server.js`.
 
 ```bash run
-cd /work/sharebox
-echo "проверка целостности" > integrity-demo.txt
-sha256sum integrity-demo.txt
-cp integrity-demo.txt integrity-demo-copy.txt
-sha256sum integrity-demo-copy.txt
-echo "испорченная версия" > integrity-demo-broken.txt
-sha256sum integrity-demo-broken.txt
+cat > server.js <<'EOF'
+import express from 'express'
+
+const app = express()
+app.use(express.json())
+
+let requestCount = 0
+app.use((req, res, next) => {
+  requestCount += 1
+  console.log(`#${requestCount} ${req.method} ${req.url}`)
+  next()
+})
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', requests: requestCount })
+})
+
+app.get('/no-next', (req, res, next) => {
+  console.log('этот обработчик ничего не ответил и не вызвал next()')
+})
+
+const PORT = process.env.PORT || 3000
+app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
+EOF
+node server.js &
+SERVER_PID=$!
+sleep 1
+curl -s http://localhost:3000/health
+echo
+curl -s http://localhost:3000/health
+echo
+timeout 2 curl -s http://localhost:3000/no-next; echo "код выхода curl: $?"
+kill $SERVER_PID
 ```
 
-**Разбор.** `-O` у `curl` — сохранить под именем, которое указал сервер (`Content-Disposition`, шаг 8.5), а не печатать в терминал. `-C -` у `curl` и `-c` у `wget` — докачать, если файл уже частично скачан (используют `Range`, шаг 8.6: `-` в `-C -` означает «вычисли точку докачки сама»). `sha256sum` — хеш содержимого файла (не путать с хешем пароля, шаг 7.1, но тот же принцип: одинаковый вход → одинаковый хеш).
+**Разбор.** `app.use(...)` без пути — выполняется на **каждый** запрос, в порядке объявления. `next()` — «передай управление дальше по цепочке»; забыл вызвать — запрос зависнет без ответа (последний `curl` с `timeout 2` это показывает). Счётчик `requestCount` растёт между запросами — переменная модуля живёт, пока жив процесс.
 
 ### result
 ```out auto
 ```
 
 ### why
-Два одинаковых файла (оригинал и копия) дают одинаковый `sha256sum`; испорченный (другое содержимое) — другой. Это способ убедиться, что ShareBox передал файл **без потерь**, даже после докачки по частям через `Range` — просуммировать готовый файл и сравнить с суммой, которую мог бы предоставить автор ссылки.
+Middleware — это то, как в сессию 11 встанет единый обработчик ошибок, в сессию 14 — проверка JWT-токена перед защищёнными роутами, в сессию 17 — rate limit и логирование. Все они — функции вида `(req, res, next)`, и порядок `app.use()` определяет, что выполнится раньше: проверка токена обязана стоять **до** роута, который требует авторизации.
+
+### deep Под капотом
+У middleware с четырьмя аргументами — `(err, req, res, next)` — особый смысл: Express распознаёт их как обработчики ошибок и вызывает только при `next(err)` или брошенном исключении внутри `async`-роута. Это и есть единый error handler сессии 11.
 
 ### deep Если не получилось
-- **`curl: command not found` на Windows** — используй PowerShell-вариант (`Invoke-WebRequest`) или поставь `curl` отдельно (в современной Windows 10/11 он уже встроен).
-- **`wget: command not found` на Mac** — на Mac по умолчанию нет `wget` (только `curl`); `brew install wget`, если нужен именно он, либо используй `curl -C -`.
+- **Запрос зависает и не отвечает** — обработчик не вызвал ни `res.send()`/`res.json()`, ни `next()` (как в `/no-next`); проверь, что каждая ветка кода либо отвечает, либо передаёт дальше.
+- **Middleware «не видит» `req.body`** — стоит раньше `express.json()` в списке `app.use()`; порядок регистрации — это и есть порядок выполнения.
 
 ### quiz
-- Что делает `-O` у `curl` и зачем он нужен при скачивании через share-ссылку?
-- Как докачать файл, не начиная заново, если соединение оборвалось на середине?
-- Как проверить, что скачанный файл не повреждён, без ручного сравнения байт за байтом?
+- Что произойдёт, если middleware не вызовет ни `res.send()`, ни `next()`?
+- В каком порядке выполняются несколько `app.use()` — в порядке объявления или как-то иначе?
+- Чем обычный middleware отличается по сигнатуре от обработчика ошибок?
+
+### links
+- https://expressjs.com/en/guide/using-middleware.html | middleware подробно | Express: Using middleware
+
+## 9.5 Статика и структура ответа | short: Статика | est: ~20 мин
+### intro
+**Слова шага:** `express.static` — middleware, отдающее файлы из папки напрямую; *статический файл* — файл, который отдают как есть (картинка, HTML); *код ответа (status code)* — число вроде 200 или 404, которое сервер шлёт вместе с ответом.
+
+Кроме JSON, серверу иногда нужно отдавать обычные файлы — картинку, HTML-страницу (в сессии 16 это будет страница скачивания share-ссылки). `express.static(папка)` — готовый middleware: отдаёт файлы из папки по их имени, без отдельного роута на каждый файл.
+
+**Файлы:** `public/hello.html`, `server.js` (дописать).
+
+```bash run
+mkdir -p public
+cat > public/hello.html <<'EOF'
+<!doctype html>
+<meta charset="utf-8">
+<h1>ShareBox</h1>
+EOF
+cat >> server.js <<'EOF'
+
+app.use('/static', express.static('public'))
+
+app.get('/status-demo', (req, res) => {
+  res.status(201).json({ created: true })
+})
+EOF
+node server.js &
+SERVER_PID=$!
+sleep 1
+curl -s http://localhost:3000/static/hello.html
+echo
+curl -s -o /dev/null -w 'код: %{http_code}\n' http://localhost:3000/status-demo
+curl -s -o /dev/null -w 'код: %{http_code}\n' http://localhost:3000/static/нет-такого.html
+kill $SERVER_PID
+```
+
+### result
+```out auto
+```
+
+### why
+`express.static` избавляет от того, чтобы вручную читать файл с диска и писать заголовки для каждой картинки или HTML-страницы — Express сам выставляет `Content-Type` по расширению, кеш-заголовки и обрабатывает `404`, если файла нет. `res.status(код)` — явное управление кодом ответа, пригодится для `201 Created` при регистрации (сессия 14) и `404`/`410` для share-ссылок (сессия 16).
+
+### deep Если не получилось
+- **`Cannot GET /static/hello.html`** — обращение идёт не через префикс `/static`, который задан в `app.use('/static', express.static('public'))`; без префикса Express не знает, что путь ведёт в эту папку.
+- **Старое содержимое после правки файла** — `express.static` может кешировать на уровне заголовков для браузера, но сам сервер каждый раз читает файл заново; если не видно изменений, проверь, что сервер перезапущен после правки `server.js`.
+
+### quiz
+- Что делает `express.static('public')` и зачем ему нужен префикс `/static` при подключении?
+- Чем `res.status(201).json(...)` отличается от простого `res.json(...)`?
+- Какой код ответа Express сам выставит для `/static/несуществующий.html`?
+
+### links
+- https://expressjs.com/en/starter/static-files.html | статические файлы | Express: Serving static files
+
+## 9.6 Каркас ShareBox: GET /health | short: Каркас проекта | est: ~20 мин
+### intro
+**Слова шага:** *структура проекта* — файлы и папки, из которых собран ShareBox; `npm install` — поставить зависимости из `package.json`; `.gitignore` — список того, что никогда не попадает в git.
+
+Соберём всё из этой сессии в постоянный каркас ShareBox — он останется на весь курс, следующие сессии будут дописывать в него, не переписывая заново.
+
+**Файлы:** `server.js`, `package.json`, `.gitignore`.
+
+```bash run
+cat > server.js <<'EOF'
+import express from 'express'
+
+const app = express()
+app.use(express.json())
+app.use('/static', express.static('public'))
+
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url}`)
+  next()
+})
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() })
+})
+
+const PORT = process.env.PORT || 3000
+app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
+EOF
+cat > package.json <<'EOF'
+{
+  "name": "sharebox",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.0.0",
+    "zod": "^4.0.0",
+    "dotenv": "^17.0.0"
+  }
+}
+EOF
+cat > .gitignore <<'EOF'
+node_modules/
+.env
+uploads/
+EOF
+npm install
+npm start &
+SERVER_PID=$!
+sleep 1
+curl -s http://localhost:3000/health
+echo
+kill $SERVER_PID
+```
+
+### result
+```out auto
+```
+
+### why
+С этого момента `server.js` + `package.json` — постоянная точка входа ShareBox. `.gitignore` закрывает `.env` (уже создан в сессии 7) и `uploads/` (появится позже, загруженные файлы, сессия 15) — их никогда не кладут в git.
+
+### deep Как ещё можно
+- **Не перезапускать сервер руками.** В этой методичке каждый пример останавливает и заново запускает сервер явно (`node server.js & … kill $SERVER_PID`) — так каждый блок воспроизводим и его может проверить скрипт. У себя в терминале так возиться не нужно: `node --watch server.js` (Node 24, без пакетов) сам перезапускает процесс при каждом сохранении файла. То же самое делает пакет `nodemon` (`npm install --save-dev nodemon`, затем `npx nodemon server.js` или скрипт `"dev": "nodemon server.js"` в `package.json`) — он старше и настраивается гибче (например, следит только за нужными папками), но по сути обёртка над `node` с тем же эффектом.
+
+### deep Если не получилось
+- **`npm start` не находит скрипт `start`** — сверь `"scripts"` в `package.json`, имя должно быть ровно `start` (зарезервированное — без `run`).
+- **Порт занят от прошлого шага** — останови предыдущий `node server.js`/`npm start` (`kill <pid>`) перед новым запуском.
+- **`Cannot find package 'zod'` в более поздних шагах** — этот `package.json` переписан целиком (`cat >`), а не дописан; если убрать из него `zod`/`dotenv` из сессий 5 и 7, `npm install` удалит их из `node_modules` как «лишние» — зависимости, поставленные раньше, нужно переносить в новый `package.json`, а не терять при переписывании.
+
+### quiz
+- Что произойдёт с `.env` и `uploads/`, если их не внести в `.gitignore` до того, как они появятся?
+- Почему `package.json` фиксирует зависимость как `express: "^5.0.0"`, а не просто ставит последнюю версию без ограничений?
+- Какую команду теперь использовать для старта ShareBox вместо `node server.js`?
 
 ### outro
 :::tip Приёмка сессии 9
-Ты можешь: создать share-ссылку со случайным кодом, сроком жизни и лимитом скачиваний; объяснить разницу `404`/`410`; защитить ссылку паролем; отдать простую HTML-страницу скачивания; собрать весь путь от регистрации до скачивания по ссылке; скачать файл из консоли (`curl`/`wget`/PowerShell) с докачкой и проверить целостность через `sha256sum`. ShareBox теперь — рабочий файлообменник end-to-end.
+Ты можешь: поднять Express-приложение и объяснить, что оно даёт поверх `node:http`; прочитать параметр пути и query-строку; получить JSON-тело `POST`-запроса через `express.json()`; написать свой middleware и объяснить роль `next()` и порядок `app.use()`; отдать статический файл и явно задать код ответа. В `/work/sharebox` — постоянный каркас: `server.js`, `package.json` с Express 5, `public/hello.html`, `.gitignore`.
 :::
 
 ### links
-- https://curl.se/docs/manpage.html | полный справочник curl | curl: Manual
+- https://expressjs.com/en/starter/hello-world.html | минимальное приложение Express | Express: Hello world example

@@ -1,397 +1,70 @@
-# Сессия 5 · PostgreSQL и SQL
+# Сессия 5 · Архитектура серверного кода
 dur: ~4 ч
 
-## 5.1 Docker Compose с базой | short: Compose и база | est: ~25 мин
+## 5.1 Зачем слои: routes → controllers → services | short: Зачем слои | est: ~25 мин
 ### intro
-**Слова шага:** *PostgreSQL* — реляционная база данных; *Docker Compose* — описывает и поднимает несколько контейнеров одним файлом; *том (volume)* — хранилище данных контейнера, переживающее перезапуск; *порт контейнера* — через него снаружи подключаются к сервису внутри.
+**Слова шага:** *слой (layer)* — часть кода с одной обязанностью; *route* — знает про HTTP (что пришло, что ответить); *controller* — связывает route и бизнес-логику; *service* — сама логика, ничего не знает про `req`/`res`; *разделение ответственности* — причина, по которой это всё не один файл.
 
-До сих пор ShareBox хранил данные прямо в коде (`Map` в шаге 4.6). Настоящим хранилищем будет **PostgreSQL** — реляционная база. Поднимем её в контейнере через **Docker Compose** — он описывает один или несколько контейнеров одним файлом и поднимает их одной командой. *Здесь и дальше Docker запускается только с твоего согласия.*
-
-```bash run hidden
-mkdir -p /work/sharebox-db-demo
-```
+Сервер из сессии 3 — один файл с `if (url.pathname === ...)`. Это нормально для демо, но на 20 роутах превращается в нечитаемую простыню. **Слои** решают это, разделяя по обязанности:
 
 ```text
-version: '3.9'
-services:
-  db:
-    image: postgres:18
-    environment:
-      POSTGRES_USER: sharebox
-      POSTGRES_PASSWORD: sharebox
-      POSTGRES_DB: sharebox
-    ports:
-      - '5432:5432'
-    volumes:
-      - db-data:/var/lib/postgresql
-volumes:
-  db-data:
+route       — что за HTTP-запрос пришёл, что вернуть (коды, заголовки)
+controller  — читает запрос, вызывает service, формирует ответ
+service     — сама логика (бизнес-правила), ничего не знает про HTTP
 ```
 
-Сохрани это как `compose.yaml` в `/work/sharebox` и подними:
+Проверка «ничего не знает про HTTP» — не формальность: **service можно вызвать из теста** (сессия 6) без поднятия сервера вообще, а controller — нельзя (ему всегда нужны `req`/`res`).
 
-```bash
-docker compose up -d
-docker compose ps
-```
-
-### result
-```out
-NAME                 IMAGE          STATUS
-sharebox-db-1        postgres:18    Up (healthy)
-```
-
-### why
-`POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` — переменные, которые образ `postgres` читает сам при первом старте и создаёт пользователя и базу с этими именами. **Том** `db-data:/var/lib/postgresql` — данные базы переживают перезапуск и пересборку контейнера (удалишь контейнер — данные останутся в томе; удалишь том — данные пропадут). Порт `5432:5432` — слева порт на твоём Mac, справа — порт внутри контейнера; через него Node (вне контейнера) сможет подключиться к базе (внутри).
-
-### deep Как ещё можно
-Вместо Docker — `brew install postgresql@18` и запустить локально (паспорт лабы это допускает как запасной путь): тогда база слушает `localhost:5432` без контейнера вообще, а имя пользователя/базы создаются командой `createdb`.
-
-### deep Если не получилось
-- **`port is already allocated`** — на 5432 уже что-то слушает (другая Postgres); останови её или поменяй левую часть порта, например `5433:5432`, и подключайся на 5433.
-- **`Up (unhealthy)` долго** — первый старт образа инициализирует базу, может занять 10–20 секунд; подожди и проверь `docker compose ps` снова.
-
-### quiz
-- Что произойдёт с данными в базе, если удалить контейнер, но не трогать том?
-- Что означают две части `5432:5432` в `ports`?
-- Откуда образ `postgres` берёт имя пользователя и базы при первом запуске?
-
-### links
-- https://docs.docker.com/compose/ | документация Docker Compose | Docker: Compose
-- https://hub.docker.com/_/postgres | официальный образ PostgreSQL | Docker Hub: postgres
-
-## 5.2 Подключение: пакет pg и пул соединений | short: pg и пул | est: ~25 мин
-### intro
-**Слова шага:** `pg` — драйвер для подключения Node к PostgreSQL; *пул соединений (connection pool)* — несколько открытых соединений наготове вместо одного на каждый запрос; `DATABASE_URL` — строка подключения к базе одной строкой; `query` — выполнить SQL-запрос через пул.
-
-Node не умеет говорить с PostgreSQL сам по себе — нужен драйвер. **`pg`** — самый распространённый. Вместо одного соединения используют **пул**: несколько уже открытых соединений наготове, потому что открывать новое на каждый запрос слишком медленно.
-
-**Файлы:** `.env` (дописать), `src/db.js`, `db-demo.js`.
+**Файлы:** `src/services/files.service.js`, `src/controllers/files.controller.js`.
 
 ```bash run
 cd /work/sharebox
-npm install pg
-cat >> .env <<'EOF'
-DATABASE_URL=postgresql://sharebox:sharebox@localhost:5432/sharebox
-EOF
-cat > src/db.js <<'EOF'
-import 'dotenv/config'
-import pg from 'pg'
-
-export const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
-EOF
-cat > db-demo.js <<'EOF'
-import { pool } from './src/db.js'
-
-const result = await pool.query('select version()')
-console.log(result.rows[0].version.split(',')[0])
-await pool.end()
-EOF
-node db-demo.js
-```
-
-**Разбор.** `connectionString` в формате `postgresql://пользователь:пароль@хост:порт/база` — одна строка вместо пяти отдельных настроек. `pool.query(sql)` сам берёт свободное соединение из пула, выполняет и возвращает его обратно. `pool.end()` — закрыть все соединения пула (без этого процесс Node не завершился бы сам — пул держит их открытыми).
-
-### result
-```out
-(нет вывода: шаг требует запущенной Postgres из 5.1 — у тебя будет настоящая версия вида «PostgreSQL 18.x»)
-```
-
-### why
-Пул — то, что позволит ShareBox обслуживать много параллельных запросов (сессия 2: event loop), не дожидаясь по очереди одного-единственного соединения. `DATABASE_URL` в `.env` — ровно то, ради чего в сессии 4 заводился `.env`: пароль от базы никогда не попадёт в git.
-
-### deep Если не получилось
-- **`ECONNREFUSED 127.0.0.1:5432`** — база из шага 5.1 не запущена; `docker compose ps` должен показывать `Up`.
-- **`password authentication failed`** — пользователь/пароль в `DATABASE_URL` не совпадают с `POSTGRES_USER`/`POSTGRES_PASSWORD` из `compose.yaml`.
-
-### quiz
-- Зачем нужен пул соединений вместо одного соединения на весь процесс?
-- Что произойдёт с процессом Node, если не вызвать `pool.end()`?
-- Из каких частей состоит `DATABASE_URL`?
-
-### links
-- https://node-postgres.com/features/pooling | пул соединений в node-postgres | node-postgres: Pooling
-
-## 5.3 SQL руками: таблицы ShareBox | short: Таблицы | est: ~30 мин
-### intro
-**Слова шага:** `CREATE TABLE` — создать таблицу в базе; *первичный ключ* — уникальный идентификатор строки (`id`); *внешний ключ (foreign key)* — поле, ссылающееся на строку другой таблицы; `REFERENCES` — ключевое слово, которым задают внешний ключ.
-
-Спроектируем три таблицы под ShareBox: пользователи, файлы, share-ссылки.
-
-```text
-users   (id, email UNIQUE, password_hash, created_at)
-files   (id, owner_id → users.id, name, size_bytes, stored_path, created_at)
-shares  (id, file_id → files.id, code UNIQUE, expires_at, download_limit, downloads_count, password_hash NULL, created_at)
-```
-
-**Файлы:** `schema.sql`, `migrate-demo.js`.
-
-```bash run
-cat > schema.sql <<'EOF'
-CREATE TABLE users (
-  id SERIAL PRIMARY KEY,
-  email TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE files (
-  id SERIAL PRIMARY KEY,
-  owner_id INTEGER NOT NULL REFERENCES users(id),
-  name TEXT NOT NULL,
-  size_bytes BIGINT NOT NULL,
-  stored_path TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE shares (
-  id SERIAL PRIMARY KEY,
-  file_id INTEGER NOT NULL REFERENCES files(id),
-  code TEXT UNIQUE NOT NULL,
-  expires_at TIMESTAMPTZ,
-  download_limit INTEGER,
-  downloads_count INTEGER NOT NULL DEFAULT 0,
-  password_hash TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-EOF
-cat > migrate-demo.js <<'EOF'
-import { readFile } from 'node:fs/promises'
-import { pool } from './src/db.js'
-
-const sql = await readFile('schema.sql', 'utf8')
-await pool.query(sql)
-const { rows } = await pool.query(`
-  select table_name from information_schema.tables
-  where table_schema = 'public' order by table_name
-`)
-console.log(rows.map((r) => r.table_name))
-await pool.end()
-EOF
-node migrate-demo.js
-```
-
-**Разбор.** `SERIAL PRIMARY KEY` — автоинкрементный целочисленный id. `REFERENCES users(id)` — **внешний ключ**: `files.owner_id` обязан указывать на существующую строку в `users`; вставить файл с несуществующим `owner_id` база не даст. `UNIQUE` на `email` и `code` — база сама не позволит дубликат.
-
-### result
-```out
-(нет вывода: требует базу из 5.1; у тебя — ['files', 'shares', 'users'])
-```
-
-### why
-Внешние ключи — это то, что не даёт базе «рассинхронизироваться»: без `REFERENCES` ничто не мешало бы создать файл с `owner_id = 9999`, которого не существует, и код узнал бы об этом только когда попытался бы показать владельца файла.
-
-### deep Если не получилось
-- **`relation "users" already exists`** — схема уже была создана в прошлый раз; это нормально при повторном запуске лабы, таблицы останутся с прошлыми данными (том переживает перезапуск, шаг 5.1). Чтобы начать с чистого листа — `docker compose down -v` (удалит и том).
-- **`insert or update on table "files" violates foreign key constraint`** — попытка вставить `owner_id`, которого нет в `users`; сначала создай пользователя.
-
-### quiz
-- Что проверяет PostgreSQL перед тем, как разрешить вставку строки с внешним ключом?
-- Почему `code` в `shares` помечен `UNIQUE`?
-- Что будет с существующими таблицами при повторном запуске `docker compose up` без `-v`?
-
-### links
-- https://www.postgresql.org/docs/current/ddl-constraints.html | ограничения (constraints) в PostgreSQL | PostgreSQL: Constraints
-
-## 5.4 Параметризованные запросы и SQL-инъекции | short: Параметры запроса | est: ~25 мин
-### intro
-**Слова шага:** *параметризованный запрос* — SQL с местом для значения вместо склейки строк; `$1` — место для первого параметра запроса; *SQL-инъекция* — атака, при которой чужой ввод меняет структуру SQL-запроса.
-
-Склеивать SQL из строк с пользовательским вводом — опасно: это и есть **SQL-инъекция**. Покажем на демонстрационной (небезопасной!) функции и тут же — безопасный вариант:
-
-**Файл:** `sql-injection-demo.js`.
-
-```bash run
-cat > sql-injection-demo.js <<'EOF'
-import { pool } from './src/db.js'
-
-await pool.query(`insert into users (email, password_hash) values ('victim@mail.com', 'x') on conflict do nothing`)
-
-// НЕБЕЗОПАСНО — только чтобы увидеть проблему, так в ShareBox никогда не пишем
-async function unsafeFindByEmail(email) {
-  const sql = `select * from users where email = '${email}'`
-  return pool.query(sql)
-}
-
-const evil = "x' OR '1'='1"
-const rows = await unsafeFindByEmail(evil)
-console.log('небезопасный запрос вернул строк:', rows.rowCount, '(должно быть 0 — это и есть инъекция)')
-
-// БЕЗОПАСНО — параметризованный запрос
-async function safeFindByEmail(email) {
-  return pool.query('select * from users where email = $1', [email])
-}
-
-const safeRows = await safeFindByEmail(evil)
-console.log('безопасный запрос вернул строк:', safeRows.rowCount)
-
-await pool.end()
-EOF
-node sql-injection-demo.js
-```
-
-**Разбор.** `$1` — место для первого параметра из массива `[email]`; драйвер `pg` сам экранирует значение и отправляет его базе **отдельно** от текста запроса — специальные символы вроде `'` никак не меняют структуру SQL. В небезопасной версии строка `x' OR '1'='1` превращает `WHERE email = 'x' OR '1'='1'` в условие, истинное для **каждой** строки таблицы.
-
-### result
-```out
-(нет вывода: требует базу из 5.1; у тебя — «небезопасный запрос вернул строк: N» где N — все пользователи, и «безопасный запрос вернул строк: 0»)
-```
-
-### why
-Это не теоретическая угроза: именно так в реальных утечках данных читали целые таблицы пользователей или обходили проверку пароля (`' OR '1'='1' --`). В ShareBox каждый SQL-запрос с данными от клиента — только через `$1, $2, ...`, без исключений.
-
-### deep Если не получилось
-- **Небезопасный запрос вернул 0 строк, а не «все»** — PostgreSQL мог отклонить синтаксис из-за других кавычек в демонстрационной строке; суть демонстрации не меняется — склейка строк опасна в принципе, не только в этом конкретном примере.
-- **`syntax error at or near` в небезопасном запросе** — тоже нормальный исход инъекции: сломанный SQL-синтаксис от постороннего ввода — другая сторона той же проблемы.
-
-### quiz
-- Что делает `$1` в SQL-запросе и чем он отличается от склейки строки через шаблонную строку JS?
-- Почему `'1'='1'` в примере заставляет условие быть истинным для каждой строки?
-- Где в коде ShareBox может появиться SQL-инъекция, если не следить за этим правилом?
-
-### links
-- https://node-postgres.com/features/queries#parameterized-query | параметризованные запросы в node-postgres | node-postgres: Parameterized query
-- https://owasp.org/www-community/attacks/SQL_Injection | SQL-инъекция подробно | OWASP: SQL Injection
-
-## 5.5 Транзакции | short: Транзакции | est: ~25 мин
-### intro
-**Слова шага:** *транзакция* — несколько запросов, которые выполняются как одно целое; `BEGIN`/`COMMIT`/`ROLLBACK` — начать, подтвердить, откатить транзакцию; *атомарность* — либо выполнились все запросы транзакции, либо ни один.
-
-Создание share-ссылки (сессия 9) — это запись в `files` и следом в `shares`: если упадёт между ними, в базе останется файл без ссылки — неполные данные. **Транзакция** делает несколько запросов неделимыми: либо выполнятся все, либо (при ошибке) ни один.
-
-**Файл:** `transaction-demo.js`.
-
-```bash run
-cat > transaction-demo.js <<'EOF'
-import { pool } from './src/db.js'
-
-async function createFileWithShare(ownerId, name, shouldFail) {
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-    const file = await client.query(
-      'insert into files (owner_id, name, size_bytes, stored_path) values ($1, $2, $3, $4) returning id',
-      [ownerId, name, 1024, '/tmp/demo']
-    )
-    if (shouldFail) throw new Error('симулируем сбой между двумя вставками')
-    await client.query(
-      'insert into shares (file_id, code) values ($1, $2)',
-      [file.rows[0].id, Math.random().toString(36).slice(2, 8)]
-    )
-    await client.query('COMMIT')
-    console.log('успех: файл и ссылка созданы вместе')
-  } catch (err) {
-    await client.query('ROLLBACK')
-    console.log('откат: ни файл, ни ссылка не сохранены —', err.message)
-  } finally {
-    client.release()
-  }
-}
-
-const user = await pool.query(`select id from users limit 1`)
-await createFileWithShare(user.rows[0].id, 'report.pdf', true)
-const count = await pool.query('select count(*) from files')
-console.log('файлов в базе после отката:', count.rows[0].count)
-
-await pool.end()
-EOF
-node transaction-demo.js
-```
-
-**Разбор.** `pool.connect()` — на транзакцию берём **одно** соединение из пула вручную (а не `pool.query`, который каждый раз может взять любое) — иначе `BEGIN` и следующий запрос рискуют оказаться на разных соединениях. `client.release()` в `finally` — обязательно вернуть соединение в пул, даже если был `ROLLBACK`.
-
-### result
-```out
-(нет вывода: требует базу из 5.1; у тебя — «откат: ...» и «файлов в базе после отката: 0» или столько, сколько было до теста)
-```
-
-### why
-Без транзакции симулированный сбой оставил бы в базе файл без ссылки — одну из форм того, что называют «рассинхронизацией данных», которую потом долго ищут руками. С транзакцией та же ошибка откатывает обе вставки сразу.
-
-### deep Если не получилось
-- **`client.release()` не вызван, пул «кончился»** — следующие запросы зависают: пул ограничен по числу соединений, не освобождённые накапливаются. `finally` в примере — именно для того, чтобы `release()` сработал и при ошибке, и без неё.
-- **Данные не откатились** — проверь, что `ROLLBACK` выполняется на **том же** `client`, что и `BEGIN`/вставки, а не через `pool.query` (новое, другое соединение).
-
-### quiz
-- Что произойдёт с первой вставкой (`files`), если вторая (`shares`) не выполнится и сделан `ROLLBACK`?
-- Почему для транзакции берут одно соединение через `pool.connect()`, а не `pool.query()` на каждый шаг?
-- Зачем `client.release()` стоит именно в блоке `finally`?
-
-### links
-- https://node-postgres.com/features/transactions | транзакции в node-postgres | node-postgres: Transactions
-
-## 5.6 Переносим ShareBox на базу | short: ShareBox на базе | est: ~30 мин
-### intro
-**Слова шага:** *миграция (стартовая)* — создание таблиц при первом запуске приложения; *слой данных (repository)* — часть кода, которая читает и пишет в базу, скрывая SQL от остального приложения.
-
-Соберём шаги 5.1–5.5 в постоянную часть ShareBox: при старте сервер сам применяет `schema.sql` (если таблиц ещё нет), а `files.service.js` из сессии 4 переходит с `Map` на настоящие запросы к базе.
-
-**Файлы:** `src/migrate.js`, `src/services/files.service.js`, `src/controllers/files.controller.js`, `server.js`.
-
-```bash run
-cat > src/migrate.js <<'EOF'
-import { readFile } from 'node:fs/promises'
-import { pool } from './db.js'
-
-export async function migrate() {
-  const sql = await readFile(new URL('../schema.sql', import.meta.url), 'utf8')
-  await pool.query(sql.replace(/CREATE TABLE/g, 'CREATE TABLE IF NOT EXISTS'))
-}
-EOF
+mkdir -p src/services src/controllers
 cat > src/services/files.service.js <<'EOF'
-import { pool } from '../db.js'
-import { NotFoundError } from '../../lib/errors.js'
+const files = new Map()
+let nextId = 1
 
-export async function getFileOrThrow(id) {
-  const { rows } = await pool.query('select * from files where id = $1', [id])
-  if (!rows[0]) throw new NotFoundError(`файл ${id} не найден`)
-  return rows[0]
+export function listFiles() {
+  return [...files.values()]
 }
 
-export async function createFile({ ownerId, name, sizeBytes, storedPath }) {
-  const { rows } = await pool.query(
-    'insert into files (owner_id, name, size_bytes, stored_path) values ($1, $2, $3, $4) returning *',
-    [ownerId, name, sizeBytes, storedPath]
-  )
-  return rows[0]
+export function addFile(name, size) {
+  const id = nextId++
+  const file = { id, name, size, createdAt: new Date().toISOString() }
+  files.set(id, file)
+  return file
+}
+
+export function getFile(id) {
+  return files.get(id) || null
 }
 EOF
 cat > src/controllers/files.controller.js <<'EOF'
-import { getFileOrThrow } from '../services/files.service.js'
+import { listFiles, addFile, getFile } from '../services/files.service.js'
 
-export async function getFile(req, res) {
-  res.json(await getFileOrThrow(req.params.id))
+export function listFilesController(req, res) {
+  res.writeHead(200, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(listFiles()))
+}
+
+export function getFileController(req, res, id) {
+  const file = getFile(Number(id))
+  if (!file) {
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not_found' }))
+    return
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(file))
 }
 EOF
-cat > server.js <<'EOF'
-import express from 'express'
-import healthRoutes from './src/routes/health.routes.js'
-import filesRoutes from './src/routes/files.routes.js'
-import { migrate } from './src/migrate.js'
-
-await migrate()
-
-const app = express()
-app.use(express.json())
-app.use(healthRoutes)
-app.use(filesRoutes)
-
-app.use((req, res) => res.status(404).json({ error: 'not_found' }))
-app.use((err, req, res, next) => {
-  console.error('поймано:', err.message)
-  res.status(err.status || 500).json({ error: err.message || 'internal' })
+node -e "
+import('./src/services/files.service.js').then(({ addFile, listFiles }) => {
+  addFile('report.pdf', 1024)
+  addFile('photo.png', 2048)
+  console.log(listFiles())
 })
-
-const PORT = process.env.PORT || 3000
-app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
-EOF
-node server.js &
-SERVER_PID=$!
-sleep 1
-curl -s http://localhost:3000/health
-echo
-curl -s -o /dev/null -w 'несуществующий файл по id из базы: %{http_code}\n' http://localhost:3000/files/999999
-kill $SERVER_PID
+"
 ```
 
 ### result
@@ -399,22 +72,226 @@ kill $SERVER_PID
 ```
 
 ### why
-`getFileOrThrow` из шага 4.6 поменял реализацию (`Map` → SQL) и заодно стал **асинхронным** — SQL-запрос не может быть мгновенным, как чтение из `Map`. Из-за этого пришлось поправить и контроллер: `getFile` в сессии 4 был обычной функцией без `await`, а теперь обязан быть `async` и дождаться результата через `await`. Если забыть это сделать, `res.json(file)` отправит клиенту незавершённый `Promise` (пустой объект `{}`) с кодом `200` вместо ожидаемого `404` — ошибка, которую легко не заметить, потому что сервер не падает и не логирует исключение.
+`files.service.js` сейчас хранит данные в `Map` — заглушка вместо базы (появится в сессии 12), но **контроллеры и роуты не изменятся**, когда `Map` заменится на Prisma: сервис снаружи выглядит так же (те же функции, тот же их смысл), меняется только то, что внутри него. Это и есть цель слоёв — менять один слой, не трогая остальные.
 
 ### deep Если не получилось
-- **`relation "files" does not exist` при старте** — `migrate()` не вызван до создания роутов, или `schema.sql` не найден по относительному пути; сверь `new URL('../schema.sql', import.meta.url)` — путь считается от `src/migrate.js`.
-- **Сервер стартует дольше обычного** — `await migrate()` перед `app.listen` — это ожидаемо, миграция выполняется один раз при каждом старте процесса (быстро благодаря `IF NOT EXISTS`).
-- **Запрос к несуществующему файлу отвечает `200` с пустым телом `{}` вместо `404`** — контроллер не обновлён до `async`/`await` вслед за асинхронным сервисом (см. «Почему» выше); сверь, что `getFile` в `files.controller.js` — `async function` и использует `await`.
+- **`Cannot find module '../services/...'`** — проверь, что команда выполняется из `/work/sharebox` и структура папок совпадает (`src/services/`, `src/controllers/` — рядом, не вложены друг в друга).
+- **Хочется сразу добавить `req`/`res` в service** — это и есть типичная ошибка, которую слои должны предотвратить; если тесту (сессия 6) нужен будет поддельный `req`, значит, что-то не туда положили.
 
 ### quiz
-- Почему `getFileOrThrow` обязан был стать `async`, хотя в сессии 4 та же функция была синхронной?
-- Что отправит клиенту `res.json(file)`, если `file` — незавершённый `Promise`, а не дождавшееся `await` значение?
-- Как по ответу `200` с пустым телом `{}` заподозрить именно забытый `await`, а не что-то другое?
+- Какой слой можно протестировать без поднятого HTTP-сервера, и почему именно он?
+- Что меняется в `files.service.js`, когда данные переедут в PostgreSQL (сессия 12), а что не должно поменяться в контроллере?
+- Почему `controller` не стоит превращать в место, где лежит вся бизнес-логика?
+
+### links
+- https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html | идея слоёв шире, чем Node | The Clean Architecture
+
+## 5.2 Свои классы ошибок | short: Классы ошибок | est: ~25 мин
+### intro
+**Слова шага:** *своя ошибка* — класс, наследующий `Error`, с дополнительными полями (например, HTTP-статус); `instanceof` — проверить, какого именно типа ошибка; `cause` — стандартное поле `Error` для «из-за чего» (исходная ошибка, которую мы обернули).
+
+`throw new Error('не найдено')` — работает, но не говорит **какой** код ответа нужен и не отличим от любой другой ошибки без разбора текста. Свои классы решают это:
+
+**Файл:** `lib/errors.js`.
+
+```bash run
+cat > lib/errors.js <<'EOF'
+export class AppError extends Error {
+  constructor(message, status = 500, options = {}) {
+    super(message, options)
+    this.status = status
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(message = 'не найдено') {
+    super(message, 404)
+  }
+}
+
+export class ValidationError extends AppError {
+  constructor(message, details = []) {
+    super(message, 422)
+    this.details = details
+  }
+}
+EOF
+node -e "
+import('./lib/errors.js').then(({ NotFoundError, ValidationError, AppError }) => {
+  const e = new NotFoundError('файл не найден')
+  console.log(e.message, e.status, e instanceof AppError, e instanceof Error)
+  const v = new ValidationError('плохие данные', ['name обязателен'])
+  console.log(v.message, v.status, v.details)
+})
+"
+```
+
+**Разбор.** `extends Error` — своя ошибка остаётся настоящей ошибкой (`instanceof Error` — true, стек вызовов есть), но несёт дополнительные поля. `super(message, options)` с полем `cause` внутри `options` — стандартный способ (ES2022) обернуть исходную ошибку, не потеряв её: `new AppError('не удалось сохранить', 500, { cause: originalErr })`.
+
+### result
+```out auto
+```
+
+### why
+Контроллер (следующий шаг) сможет написать один общий обработчик: `catch (err) { res.writeHead(err.status || 500); ... }` — вместо `if/else` по тексту сообщения. В сессии 9 (Express) это же `status` подхватит общий error handler — тот же класс ошибок, без переписывания.
+
+### deep Если не получилось
+- **`e.status` равен `undefined`** — не передан второй аргумент в `super()`/конструктор, или используется базовый `Error` вместо `AppError`.
+- **`instanceof NotFoundError` — false там, где ожидала true** — сверь, что класс действительно импортирован из того же файла (два разных файла с одинаковым именем класса — разные классы для JS).
+
+### quiz
+- Зачем своей ошибке нужно поле `status`, если можно просто писать `if (err.message === '...')`?
+- Что делает `cause` и когда он полезен?
+- Что останется true для любой ошибки, унаследованной от `Error`, независимо от доп. полей?
+
+### links
+- https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/cause | справочник по Error.cause | MDN: Error: cause
+
+## 5.3 Валидация на границе: zod | short: zod | est: ~25 мин
+### intro
+**Слова шага:** *граница (boundary)* — место, где в систему входят внешние данные (тело запроса, файл, аргументы CLI); `zod` — библиотека схем: описываешь форму данных один раз, получаешь и проверку, и типизированный результат; `safeParse` — проверить данные, не бросая исключение, с объектом `{ success, data | error }`.
+
+Проверять данные `if (!body.name) throw ...` для каждого поля вручную — долго и легко забыть одно поле. **`zod`** описывает форму данных один раз:
+
+**Файл:** `src/schemas/file.schema.js`.
+
+```bash run
+npm install zod
+mkdir -p src/schemas
+cat > src/schemas/file.schema.js <<'EOF'
+import { z } from 'zod'
+
+export const createFileSchema = z.object({
+  name: z.string().min(1, 'имя обязательно'),
+  size: z.number().int().positive('размер должен быть положительным'),
+})
+EOF
+node -e "
+import('./src/schemas/file.schema.js').then(({ createFileSchema }) => {
+  const ok = createFileSchema.safeParse({ name: 'report.pdf', size: 1024 })
+  console.log('валидно:', ok.success, ok.data)
+  const bad = createFileSchema.safeParse({ name: '', size: -5 })
+  console.log('валидно:', bad.success)
+  console.log(bad.error.issues.map((i) => i.message))
+})
+"
+```
+
+**Разбор.** `safeParse` **не бросает** исключение — возвращает объект с `success` и либо `data` (уже проверенные и приведённые к нужным типам значения), либо `error.issues` (список, что именно не так, по каждому полю отдельно). Это удобнее `parse` (который бросает) там, где ошибку нужно аккуратно превратить в ответ 422, а не в падение процесса.
+
+### result
+```out auto
+```
+
+### why
+Граница — единственное место, где данные **нельзя доверять**: они пришли от клиента, который может прислать что угодно. `createFileSchema` дальше (сессия 9) встанет в контроллер ShareBox перед тем, как данные попадут в `files.service.js` — сервис может быть уверен, что получил уже проверенные `name`/`size`, и не должен сам ничего перепроверять.
+
+### deep Если не получилось
+- **`npm install zod` долго или не находит пакет** — проверь сеть контейнера; если это временная недоступность реестра, повтори команду.
+- **`bad.error` — `undefined`** — поле результата `safeParse` называется `error` только когда `success: false`; при `success: true` его нет, есть `data`.
+
+### quiz
+- Чем `safeParse` отличается от `parse` с точки зрения обработки ошибки?
+- Почему валидировать нужно именно на границе, а не внутри `files.service.js`?
+- Что будет в `ok.data`, если прислать `size: "1024"` (строку, а не число)? Проверь сама.
+
+### links
+- https://zod.dev/ | документация zod | zod: Introduction
+
+## 5.4 Собираем сервер на слоях | short: Сервер на слоях | est: ~30 мин
+### intro
+**Слова шага:** *DI (Dependency Injection) руками* — передавать зависимости (например, функции сервиса) как аргументы, а не брать их из глобального импорта внутри каждого файла — упрощает подмену в тестах (сессия 6).
+
+Соберём всё вместе: роут из сессии 3 вызывает контроллер, контроллер — сервис, ошибки — через классы из шага 5.2, тело запроса — через схему из шага 5.3:
+
+**Файл:** `layered-server.js`, обновлённый `src/controllers/files.controller.js`.
+
+```bash run
+cat > src/controllers/files.controller.js <<'EOF'
+import { listFiles, addFile, getFile } from '../services/files.service.js'
+import { createFileSchema } from '../schemas/file.schema.js'
+import { NotFoundError, ValidationError } from '../../lib/errors.js'
+
+export function listFilesController(req, res) {
+  res.writeHead(200, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(listFiles()))
+}
+
+export function getFileController(req, res, id) {
+  const file = getFile(Number(id))
+  if (!file) throw new NotFoundError(`файл ${id} не найден`)
+  res.writeHead(200, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(file))
+}
+
+export async function createFileController(req, res) {
+  let body = ''
+  for await (const chunk of req) body += chunk
+  const parsed = createFileSchema.safeParse(JSON.parse(body || '{}'))
+  if (!parsed.success) throw new ValidationError('плохие данные', parsed.error.issues.map((i) => i.message))
+  const file = addFile(parsed.data.name, parsed.data.size)
+  res.writeHead(201, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(file))
+}
+EOF
+cat > layered-server.js <<'EOF'
+import { createServer } from 'node:http'
+import { listFilesController, getFileController, createFileController } from './src/controllers/files.controller.js'
+import { AppError } from './lib/errors.js'
+
+const server = createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`)
+    if (url.pathname === '/files' && req.method === 'GET') return listFilesController(req, res)
+    if (url.pathname === '/files' && req.method === 'POST') return await createFileController(req, res)
+    const m = url.pathname.match(/^\/files\/(\d+)$/)
+    if (m && req.method === 'GET') return getFileController(req, res, m[1])
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'not_found' }))
+  } catch (err) {
+    const status = err instanceof AppError ? err.status : 500
+    console.error('поймано:', err.message)
+    res.writeHead(status, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: err.name, message: err.message, details: err.details }))
+  }
+})
+server.listen(3400, () => console.log('layered-server на 3400'))
+EOF
+node layered-server.js &
+SERVER_PID=$!
+sleep 1
+curl -s -X POST -H 'Content-Type: application/json' -d '{"name":"a.pdf","size":100}' http://localhost:3400/files
+echo
+curl -s http://localhost:3400/files/1
+echo
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3400/files/999
+curl -s -X POST -H 'Content-Type: application/json' -d '{"name":"","size":-1}' http://localhost:3400/files
+echo
+kill $SERVER_PID
+```
+
+**Разбор.** `for await (const chunk of req)` — `req` сам асинхронно итерируемый поток (сессия 2 + `js-lab`: `for await` — то же, что `.on('data')`, но без ручной сборки через `Promise`); `try/catch` вокруг всего обработчика — единая точка, куда долетают ошибки любого слоя, и `err.status` (из шага 5.2) решает код ответа.
+
+### result
+```out auto
+```
+
+### why
+Это ровно тот код (минус сам транспорт — в сессии 9 его возьмёт на себя Express), который переедет в ShareBox без переписывания: `files.service.js`, `files.controller.js`, `errors.js`, `file.schema.js` останутся теми же файлами, Express просто подключит их через свой роутинг и свой `(err, req, res, next)` вместо ручного `try/catch`.
+
+### deep Если не получилось
+- **`JSON.parse(body || '{}')` падает** — тело не валидный JSON; добавь свой `try/catch` вокруг `JSON.parse`, если хочешь вернуть 400 вместо 500 на кривой JSON (входит в «что дальше»).
+- **404 вместо 422 на плохих данных** — проверь регулярку `^\/files\/(\d+)$` — она ловит только числовой `id`, нетиповой путь уйдёт в общий 404 раньше, чем до валидации дойдёт очередь.
+
+### quiz
+- Где именно в этом коде происходит валидация, и что случится с данными, если её убрать?
+- Как единый `catch` в `layered-server.js` использует `err.status` из шага 5.2?
+- Какие из четырёх файлов (`service`, `controller`, `errors`, `schema`) не изменятся, когда в сессии 9 появится Express?
 
 ### outro
 :::tip Приёмка сессии 5
-Ты можешь: поднять PostgreSQL в Docker Compose и объяснить роль тома; подключиться к базе из Node через пул `pg`; создать таблицы с первичными и внешними ключами; объяснить и предотвратить SQL-инъекцию через параметризованные запросы; обернуть несколько запросов в транзакцию с откатом при ошибке. ShareBox теперь хранит файлы в PostgreSQL вместо `Map` в памяти.
+Ты можешь: объяснить, зачем нужны слои routes/controllers/services и что от них выигрывает тестирование; написать свой класс ошибки со статусом и `cause`; описать форму данных схемой zod и получить понятные ошибки по полям; собрать HTTP-обработчик, который использует все слои вместе через один `try/catch`. В `/work/sharebox`: `src/services/files.service.js`, `src/controllers/files.controller.js`, `lib/errors.js`, `src/schemas/file.schema.js`, `layered-server.js`.
 :::
 
 ### links
-- https://node-postgres.com/ | полная документация node-postgres | node-postgres: Documentation
+- https://nodejs.org/api/stream.html#async-iterators | `for await` на потоках | Node.js: Streams (async iterators)

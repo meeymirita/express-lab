@@ -1,4 +1,35 @@
 # 1 · Шпаргалка: команды и конструкции | short: Шпаргалка | kind: ref
+**Файлы, Buffer, Streams (часть I)**
+
+| Конструкция | Что значит |
+|---|---|
+| `readFile`/`writeFile`/`mkdir`/`readdir` из `node:fs/promises` | файловые операции, возвращают `Promise` |
+| `join(a, b)`, `resolve(p)`, `extname(p)`, `basename(p)`, `dirname(p)` из `node:path` | склейка и разбор путей кроссплатформенно |
+| `new EventEmitter()`, `.on('имя', fn)`, `.emit('имя', ...)` | подписка на событие и его вызов |
+| `createReadStream(path)`, `createWriteStream(path)`, `.pipe(dst)` | потоковое чтение/запись, `pipe` сам управляет backpressure |
+| `Buffer.from('текст', 'utf8')` | кусок байтов из строки |
+
+**Протокол HTTP руками (часть I)**
+
+| Конструкция | Что значит |
+|---|---|
+| `curl -v URL` | показать весь диалог (`>` — отправлено, `<` — получено) |
+| `curl -d 'a=1&b=2' URL` | тело `application/x-www-form-urlencoded` |
+| `curl -F 'name=Mira' -F 'file=@путь' URL` | тело `multipart/form-data` |
+| `curl -c jar.txt URL`, `curl -b jar.txt URL` | сохранить/отправить cookie как в браузере |
+| `curl -s -o /dev/null -w '%{http_code} %{http_version}\n' URL` | только код ответа и версия протокола, без тела |
+| `new URL(req.url, 'http://' + req.headers.host)` | разобрать путь и query-строку из `req.url` в `node:http` |
+
+**Процессы и параллелизм (часть I)**
+
+| Конструкция | Что значит |
+|---|---|
+| `spawn('cmd', [args])`, `.stdout.on('data', ...)`, `.on('close', code)` | запустить внешнюю программу, читать её вывод потоком |
+| `new Worker(url, { workerData })`, `parentPort.postMessage(x)` | вынести тяжёлое вычисление в отдельный поток |
+| `cluster.isPrimary`, `cluster.fork()` | несколько процессов-копий на одном порту |
+| `createHash('sha256').update(data).digest('hex')` | посчитать хеш |
+| `randomBytes(n)`, `randomUUID()` | криптографически стойкая случайность (не `Math.random()`) |
+
 **Node: запуск и модули**
 
 | Команда / конструкция | Что делает |
@@ -38,6 +69,15 @@
 | `throw new NotFoundError(...)`, обработка в едином error handler'е | бросить — поймать один раз, а не в каждом роуте |
 | `Schema.safeParse(req.body)` (zod) | валидация без исключений: `{ success, data }` или `{ success: false, error }` |
 | `process.env.X` + `dotenv` / `--env-file=.env` | конфигурация вне кода |
+
+**REST и контракт API**
+
+| Конструкция | Что значит |
+|---|---|
+| `GET /files`, `POST /files`, `GET /files/:id` | ресурс — существительное в URL, действие — в методе |
+| `{ "error": "<код>", "message": "<текст>" }` | единый контракт ошибки на всё API |
+| `Idempotency-Key` заголовком + `Map`/таблица уже обработанных ключей | повтор `POST` с тем же ключом не создаёт вторую сущность |
+| `/v1/...` | версия API в пути |
 
 **PostgreSQL: `pg` и Prisma**
 

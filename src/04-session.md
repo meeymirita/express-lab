@@ -1,385 +1,300 @@
-# Сессия 4 · Ошибки, валидация, структура
+# Сессия 4 · Процессы и параллелизм
 dur: ~4 ч
 
-## 4.1 Единый обработчик ошибок | short: Error handler | est: ~25 мин
+## 4.1 child_process: запускаем внешнюю команду | short: child_process | est: ~25 мин
 ### intro
-**Слова шага:** *обработчик ошибок (error handler)* — единое место, куда стекаются все ошибки приложения; `next(err)` — передать ошибку в этот обработчик; *четырёхаргументный middleware* — `(err, req, res, next)` — так Express узнаёт обработчик ошибок.
+**Слова шага:** `child_process` — модуль для запуска других программ из Node; `spawn` — запустить процесс и получить его вывод потоком (сессия 2); `exec` — запустить и получить весь вывод целиком, когда он короткий; *код выхода (exit code)* — число, которым процесс сообщает «ОК» (0) или «ошибка» (не 0).
 
-Сейчас, если внутри роута бросить исключение, Express 5 сам его поймает (в отличие от Express 4, где `async`-ошибки без `try/catch` роняли процесс) и покажет стандартную страницу с HTML-трейсом — некрасиво и небезопасно для продакшена. Нужен **свой** обработчик — middleware с четырьмя аргументами `(err, req, res, next)`, единственный в приложении:
+Node не обязан делать всё сам — иногда проще вызвать готовую программу. **`spawn`** возвращает процесс как поток (для длинного или большого вывода), **`exec`** — удобнее для короткой команды, чей вывод нужен целиком:
 
-**Файл:** `server.js`.
+**Файл:** `spawn-demo.js`.
 
 ```bash run
 cd /work/sharebox
-cat > server.js <<'EOF'
-import express from 'express'
+cat > spawn-demo.js <<'EOF'
+import { spawn } from 'node:child_process'
 
-const app = express()
-app.use(express.json())
+const child = spawn('ls', ['-la', 'lib'])
 
-app.get('/boom', (req, res) => {
-  throw new Error('что-то сломалось')
-})
-
-app.get('/boom-async', async (req, res) => {
-  await Promise.resolve()
-  throw new Error('сломалось асинхронно')
-})
-
-app.use((req, res) => {
-  res.status(404).json({ error: 'not_found', message: 'такого адреса нет' })
-})
-
-app.use((err, req, res, next) => {
-  console.error('поймано:', err.message)
-  res.status(500).json({ error: 'internal', message: 'что-то пошло не так' })
-})
-
-const PORT = process.env.PORT || 3000
-app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
+child.stdout.on('data', (chunk) => process.stdout.write(chunk))
+child.stderr.on('data', (chunk) => process.stderr.write(chunk))
+child.on('close', (code) => console.log('процесс завершился с кодом:', code))
 EOF
-node server.js &
-SERVER_PID=$!
-sleep 2
-curl -s -o /dev/null -w 'boom: %{http_code}\n' http://localhost:3000/boom
-curl -s -o /dev/null -w 'boom-async: %{http_code}\n' http://localhost:3000/boom-async
-curl -s -o /dev/null -w 'нет такого пути: %{http_code}\n' http://localhost:3000/nope
-kill $SERVER_PID
+node spawn-demo.js
 ```
+
+**Разбор.** `child.stdout`/`child.stderr` — читаемые потоки (сессия 2), `close` — событие завершения с кодом выхода. Если программа не найдена или упала — код выхода не `0`, и это надо проверять, а не считать, что раз `spawn` не бросил исключение, значит всё прошло успешно.
 
 ### result
 ```out auto
 ```
 
 ### why
-Без единого обработчика клиент ShareBox получил бы либо HTML-страницу с деталями исключения (утечка информации о структуре кода), либо, в старых версиях Express, сервер падал бы целиком. Четырёхаргументный middleware — последний в цепочке `app.use()`: до него доходят все ошибки, брошенные синхронно или асинхронно в любом роуте.
-
-### deep Под капотом
-Express 5 (в отличие от 4) сам оборачивает `async`-обработчики и передаёт отклонённый промис в `next(err)` — поэтому `throw` внутри `async (req, res) => {...}` и долетает до error handler без ручного `try/catch` в каждом роуте. Это одно из главных отличий версии 5 от 4.
+`sha256sum`, `tar`, системные утилиты для PDF или картинок — всё это проще вызвать `spawn`, чем переписывать на JS. ShareBox этим не пользуется напрямую, но то же самое API — у `docker`, `git` и любых CLI-обёрток на Node.
 
 ### deep Если не получилось
-- **404-обработчик сработал и для `/boom`** — порядок важен: `app.use(404-обработчик)` должен стоять **после** всех настоящих роутов, но **до** error handler'а с 4 аргументами.
-- **Ошибка не поймана, видна стандартная HTML-страница Express** — error handler определён не последним или у него не 4 аргумента (3 или меньше — Express не распознает его как обработчик ошибок).
+- **`ENOENT`** — команда не найдена (в `node:24-alpine` минимальный набор утилит; `ls` есть, экзотических команд может не быть).
+- **Вывод не появляется** — `spawn` асинхронный; вывод приходит по мере готовности, а не сразу всей пачкой.
 
 ### quiz
-- По какому признаку Express понимает, что middleware — это именно обработчик ошибок?
-- Почему в Express 5 `throw` внутри `async`-роута долетает до error handler без `try/catch`?
-- В каком порядке должны идти обычные роуты, 404-обработчик и error handler?
+- Чем `spawn` отличается от `exec` с точки зрения того, как возвращается вывод?
+- Что означает код выхода `0` и что означает любой другой?
+- Через какие объекты можно прочитать stdout и stderr дочернего процесса?
 
 ### links
-- https://expressjs.com/en/guide/error-handling.html | обработка ошибок | Express: Error Handling
+- https://nodejs.org/api/child_process.html | справочник по child_process | Node.js: Child Process
 
-## 4.2 Свои классы ошибок | short: Классы ошибок | est: ~25 мин
+## 4.2 Event loop и тяжёлые вычисления | short: Блокировка event loop | est: ~25 мин
 ### intro
-**Слова шага:** *класс ошибки* — свой тип ошибки со статусом вместо обычного `Error`; `extends Error` — наследование от встроенного класса ошибок; `instanceof` — проверка, к какому классу относится объект; *код ошибки (error code)* — например, `status: 404` у своей ошибки.
+**Слова шага:** *блокировка event loop* — синхронный код, который долго не отдаёт управление, из-за чего Node не может обработать другие запросы; *CPU-bound* — задача, упирающаяся в процессор, а не в ожидание сети/диска.
 
-`new Error('сообщение')` одинаков для всего — непонятно, 404 это или 403. Сделаем свои классы, каждый со своим HTTP-статусом:
+Node однопоточный (`js-lab`): пока выполняется **синхронный** код, event loop не может заняться ничем другим — даже ответить на другой HTTP-запрос. Покажем это на сервере с одним медленным обработчиком:
 
-**Файлы:** `lib/errors.js`, `errors-demo.js`.
+**Файл:** `blocking-server.js`.
 
 ```bash run
-mkdir -p lib
-cat > lib/errors.js <<'EOF'
-export class AppError extends Error {
-  constructor(message, status = 500) {
-    super(message)
-    this.status = status
-  }
+cat > blocking-server.js <<'EOF'
+import { createServer } from 'node:http'
+
+function slowSum(n) {
+  let total = 0
+  for (let i = 0; i < n; i++) total += i
+  return total
 }
 
-export class NotFoundError extends AppError {
-  constructor(message = 'не найдено') {
-    super(message, 404)
+const server = createServer((req, res) => {
+  if (req.url === '/slow') {
+    const result = slowSum(5_000_000_000)
+    res.end(`сумма: ${result}\n`)
+    return
   }
-}
-
-export class ForbiddenError extends AppError {
-  constructor(message = 'доступ запрещён') {
-    super(message, 403)
-  }
-}
-EOF
-cat > errors-demo.js <<'EOF'
-import { NotFoundError, AppError } from './lib/errors.js'
-
-const err = new NotFoundError('файл abc123 не существует')
-console.log(err.message, '| статус:', err.status)
-console.log('это AppError:', err instanceof AppError)
-console.log('это обычный Error:', err instanceof Error)
-EOF
-node errors-demo.js
-```
-
-**Разбор.** `extends Error` — наследуем всё поведение `Error` (включая `.stack` — трассировку вызова) и добавляем своё поле `status`. `NotFoundError extends AppError` — иерархия: `instanceof AppError` верно для **любой** ошибки семейства, значит error handler сможет обработать их все одним условием.
-
-### result
-```out auto
-```
-
-### why
-В error handler дальше будет одна проверка: `if (err instanceof AppError) { res.status(err.status)... } else { res.status(500)... }` — своя ошибка (файл не найден, доступ запрещён) отдаёт клиенту понятный статус и сообщение, а непредвиденная (баг, сеть, база) — всегда `500` без утечки деталей.
-
-### deep Если не получилось
-- **`err.status` — `undefined`** — создан обычный `new Error(...)` вместо `new NotFoundError(...)`; обычный `Error` не знает про `status`, его добавил только `AppError`.
-- **`instanceof` возвращает `false`, хотя класс вроде свой** — обычно означает, что `errors.js` импортирован из двух разных файлов с разным путём (опечатка в `./lib/errors.js`), и это на самом деле два разных модуля в кеше (сессия 1.3) — Node считает их разными классами.
-
-### quiz
-- Зачем `NotFoundError` наследуется от `AppError`, а не прямо от `Error`?
-- Что добавляет `AppError` к встроенному `Error`?
-- Как одной проверкой `instanceof` отличить «ожидаемую» ошибку (ошибка пользователя) от «неожиданной» (баг)?
-
-### links
-- https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error | справочник по Error | MDN: Error
-
-## 4.3 Валидация с zod | short: zod | est: ~25 мин
-### intro
-**Слова шага:** *валидация* — проверка, что данные от клиента имеют нужную форму; `zod` — библиотека для описания и проверки формы данных; *схема* — описание ожидаемых полей и типов; `safeParse` — проверить данные, не бросая исключение.
-
-Данные из `req.body` — это всегда что угодно, что прислал клиент: без проверки `req.body.email` может оказаться числом, массивом или вовсе отсутствовать. **zod** — библиотека для описания формы данных (**схема**) и проверки по ней:
-
-**Файл:** `zod-demo.js`.
-
-```bash run
-npm install zod
-cat > zod-demo.js <<'EOF'
-import { z } from 'zod'
-
-const RegisterSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
+  res.end('быстрый ответ\n')
 })
-
-const good = RegisterSchema.safeParse({ email: 'a@b.com', password: '12345678' })
-console.log('валидно:', good.success)
-
-const bad = RegisterSchema.safeParse({ email: 'не-похоже-на-почту', password: '123' })
-console.log('валидно:', bad.success)
-if (!bad.success) {
-  console.log('ошибки:', bad.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`))
-}
+server.listen(3300, () => console.log('blocking-server на 3300'))
 EOF
-node zod-demo.js
-```
-
-**Разбор.** `z.object({...})` описывает форму ожидаемых данных декларативно, а не через ручные `if`. `safeParse` **не бросает исключение** — возвращает объект `{ success, data }` или `{ success: false, error }`; есть и `parse`, который бросает — выбор зависит от того, хочешь ли ты `try/catch` или проверку `if`.
-
-### result
-```out auto
-```
-
-### why
-Регистрация ShareBox (сессия 7) и загрузка файла с параметрами (срок жизни ссылки, пароль — сессия 9) — везде данные от клиента проходят через zod-схему **до** того, как попадут в базу: это не даёт заведомо кривым данным пойти дальше по коду и всплыть непонятной ошибкой на три слоя глубже.
-
-### deep Если не получилось
-- **`Cannot find module 'zod'`** — `npm install zod` не выполнен или выполнен не в папке проекта.
-- **`bad.error.issues` — пусто или не то** — после неуспешного `safeParse` поле данных называется `error`, а не `data`; `data` появляется только при `success: true`.
-
-### quiz
-- Чем `safeParse` отличается от `parse` в плане обработки ошибок?
-- Что хранится в `bad.error.issues` и как узнать, какое именно поле не прошло проверку?
-- Почему проверка формы данных должна идти **до** записи в базу, а не после?
-
-### links
-- https://zod.dev/ | официальная документация | Zod: Documentation
-
-## 4.4 Слои: routes → controllers → services | short: Слои приложения | est: ~30 мин
-### intro
-**Слова шага:** *слой (layer)* — часть кода с одной ролью (роут, контроллер, сервис); `routes` — какой адрес к какой функции ведёт; `controller` — разбирает `req`, вызывает сервис, собирает `res`; `service` — сама логика, без Express и HTTP вообще; *разделение ответственности* — каждый слой делает одно дело.
-
-Весь код ShareBox пока живёт в одном `server.js`. На пару роутов — нормально, на тридцать — нечитаемо. Разложим по **слоям**: `routes` (какой адрес к какой функции ведёт) → `controllers` (разобрать `req`, вызвать нужную логику, собрать `res`) → `services` (сама логика, без Express вообще — её можно было бы вызвать и из консоли, и из теста).
-
-**Файлы:** `src/services/health.service.js`, `src/controllers/health.controller.js`, `src/routes/health.routes.js`, `server.js`.
-
-```bash run
-mkdir -p src/routes src/controllers src/services
-cat > src/services/health.service.js <<'EOF'
-export function getHealthStatus() {
-  return { status: 'ok', uptime: process.uptime() }
-}
-EOF
-cat > src/controllers/health.controller.js <<'EOF'
-import { getHealthStatus } from '../services/health.service.js'
-
-export function healthCheck(req, res) {
-  res.json(getHealthStatus())
-}
-EOF
-cat > src/routes/health.routes.js <<'EOF'
-import { Router } from 'express'
-import { healthCheck } from '../controllers/health.controller.js'
-
-const router = Router()
-router.get('/health', healthCheck)
-export default router
-EOF
-cat > server.js <<'EOF'
-import express from 'express'
-import healthRoutes from './src/routes/health.routes.js'
-
-const app = express()
-app.use(express.json())
-app.use(healthRoutes)
-
-const PORT = process.env.PORT || 3000
-app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
-EOF
-node server.js &
+node blocking-server.js &
 SERVER_PID=$!
 sleep 1
-curl -s http://localhost:3000/health
-echo
+(curl -s http://localhost:3300/slow &)
+sleep 0.3
+time curl -s http://localhost:3300/
 kill $SERVER_PID
 ```
 
-**Разбор.** `Router()` — мини-приложение Express: свой набор роутов, который потом «вшивается» в главный `app` через `app.use(router)`. Стрелка зависимости идёт в одну сторону: `routes` знает про `controllers`, `controllers` — про `services`, а `services` **не знает** про Express вообще — в нём нет ни `req`, ни `res`.
-
 ### result
 ```out auto
 ```
 
 ### why
-Эта структура — то, во что дальше лягут все сессии: авторизация (сессия 7) — `auth.service.js` + `auth.controller.js` + `auth.routes.js`; файлы (сессия 8) — та же тройка. `services` без Express — именно то, что в сессии 11 будет напрямую вызываться из тестов `node:test`, без поднятия HTTP-сервера.
+Второй запрос (`/`, обычно мгновенный) ждёт столько же, сколько считается `/slow` — event loop занят одним синхронным циклом и физически не может переключиться на другой запрос, пока цикл не закончится. Для ShareBox это значит: тяжёлые вычисления (например, хеширование очень большого файла, сессия 15) синхронным кодом в обработчике запроса **заблокируют всех остальных пользователей**.
 
 ### deep Если не получилось
-- **`Cannot find module '../services/health.service.js'`** — относительный путь считается от файла, где написан `import`, а не от корня проекта; из `src/controllers/` до `src/services/` — именно `../services/...`.
-- **Роут не найден (404 на `/health`)** — `app.use(healthRoutes)` не вызван в `server.js`, или `router.get('/health', ...)` написан с опечаткой.
+- **Второй `curl` не выглядит медленным** — число `5_000_000_000` подобрано для заметной задержки (секунды); если машина быстрая, увеличь его на порядок.
+- **`time` не печатает результат** — `time` в примере меряет именно `curl`, а не весь скрипт; проверь, что он стоит отдельной командой перед `curl`, как в примере.
 
 ### quiz
-- В какую сторону разрешено «знать друг про друга» между routes, controllers и services, и почему не наоборот?
-- Почему `services` не должен принимать `req`/`res` напрямую?
-- Что делает `Router()` и как он попадает в основной `app`?
+- Почему второй запрос ждёт столько же, сколько считается первый, хотя они не связаны логикой?
+- Чем CPU-bound задача отличается от ожидания сети или диска с точки зрения event loop?
+- Что произойдёт с остальными пользователями ShareBox, если один обработчик считает что-то синхронно и долго?
 
 ### links
-- https://expressjs.com/en/guide/routing.html#express-router | Router в Express | Express: express.Router
+- https://nodejs.org/en/learn/asynchronous-work/dont-block-the-event-loop | Don't Block the Event Loop | Node.js: Don't Block the Event Loop
 
-## 4.5 .env и переменные конфигурации | short: .env | est: ~20 мин
+## 4.3 worker_threads: выносим вычисление в отдельный поток | short: worker_threads | est: ~30 мин
 ### intro
-**Слова шага:** `.env` — файл с переменными окружения, не попадающий в git; `dotenv` — пакет, который читает `.env` в `process.env`; *секрет* — пароль или ключ, который нельзя хранить в коде; `process.env` — объект со всеми переменными окружения.
+**Слова шага:** `worker_threads` — модуль для настоящих параллельных потоков внутри одного процесса Node; `Worker` — отдельный поток со своим event loop; `postMessage`/`on('message')` — обмен сообщениями между главным потоком и воркером; *копирование, а не общая память* — сообщения между потоками копируются (кроме специальных `SharedArrayBuffer`), это безопаснее, но не бесплатно.
 
-Из шага 1.5 ты знаешь `process.env`. Хранить `PORT=4000` в терминале перед каждым запуском неудобно, а пароль от базы (сессия 5) в коде — вообще нельзя: код уходит в git, пароль — нет. Решение — файл `.env` (он уже в `.gitignore`, шаг 3.6) и пакет `dotenv`, который читает его в `process.env` при старте:
+**`worker_threads`** даёт настоящий параллелизм: тяжёлое вычисление уходит в отдельный поток со своим собственным event loop, а главный поток продолжает принимать запросы. Вынесем `slowSum` из шага 4.2:
 
-**Файлы:** `.env`, `src/config.js`.
+**Файлы:** `sum-worker.js`, `worker-server.js`.
 
 ```bash run
-npm install dotenv
-cat > .env <<'EOF'
-PORT=3000
-APP_NAME=ShareBox
-EOF
-cat > src/config.js <<'EOF'
-import 'dotenv/config'
+cat > sum-worker.js <<'EOF'
+import { parentPort, workerData } from 'node:worker_threads'
 
-export const config = {
-  port: process.env.PORT || 3000,
-  appName: process.env.APP_NAME || 'без имени',
-}
+let total = 0
+for (let i = 0; i < workerData.n; i++) total += i
+parentPort.postMessage(total)
 EOF
-node -e "import('./src/config.js').then((m) => console.log(m.config))"
+cat > worker-server.js <<'EOF'
+import { createServer } from 'node:http'
+import { Worker } from 'node:worker_threads'
+
+function sumInWorker(n) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./sum-worker.js', import.meta.url), { workerData: { n } })
+    worker.on('message', resolve)
+    worker.on('error', reject)
+  })
+}
+
+const server = createServer(async (req, res) => {
+  if (req.url === '/slow') {
+    const result = await sumInWorker(5_000_000_000)
+    res.end(`сумма из воркера: ${result}\n`)
+    return
+  }
+  res.end('быстрый ответ\n')
+})
+server.listen(3301, () => console.log('worker-server на 3301'))
+EOF
+node worker-server.js &
+SERVER_PID=$!
+sleep 1
+(curl -s http://localhost:3301/slow &)
+sleep 0.3
+time curl -s http://localhost:3301/
+kill $SERVER_PID
 ```
+
+**Разбор.** `new Worker(путь, { workerData })` — запускает файл в отдельном потоке и передаёт ему данные (`workerData`, доступен внутри воркера сразу, без сообщения). `parentPort.postMessage(result)` — воркер отправляет результат обратно; `worker.on('message', ...)` в главном потоке его получает. Между потоками данные **копируются** — воркер не может напрямую трогать переменные главного потока, и наоборот.
 
 ### result
 ```out auto
 ```
 
 ### why
-`import 'dotenv/config'` — импорт ради побочного эффекта (без `from ...`): просто читает `.env` и заполняет `process.env`, до того как остальной код до него обратится. На сервере в продакшене `.env`-файла может не быть вовсе — там переменные окружения задаёт сама система или оркестратор (Docker, Kubernetes), и `dotenv` тогда просто ничего не находит и не мешает — `process.env` уже заполнен снаружи.
+Сравни время второго `curl` здесь и в шаге 4.2: главный поток свободен принимать `/` сразу же, пока воркер считает `/slow` отдельно. Это и есть ответ на вопрос «что делать с тяжёлыми вычислениями в Node» — не синхронный цикл в обработчике, а `worker_threads` (для вычислений в процессе) или отдельный сервис (для совсем тяжёлого — вне рамок этой лабы).
+
+### deep Как ещё можно
+Пул воркеров (создавать не новый `Worker` на каждый запрос, а заранее несколько и раздавать им задачи) эффективнее при частых вызовах — создание потока не бесплатно; библиотека `piscina` на npm делает это за тебя. В этой лабе — один `Worker` на вызов, этого достаточно, чтобы понять механизм.
 
 ### deep Если не получилось
-- **`config.port` всегда `3000`, хотя `.env` правили** — `import 'dotenv/config'` должен быть **первой** строкой входного файла, до любого кода, который читает `process.env`; иначе переменные ещё не загружены в момент чтения.
-- **`.env` случайно закоммичен** — проверь `git status`: если файл попал в индекс, он не должен был (загляни в `.gitignore` из шага 3.6).
+- **`ERR_WORKER_PATH`** — путь к файлу воркера неверный; `new URL('./sum-worker.js', import.meta.url)` работает только если оба файла в одной папке.
+- **Второй `curl` всё равно медленный** — проверь, что сервер перезапущен (`worker-server.js`, а не старый `blocking-server.js` на другом порту — 3301, не 3300).
 
 ### quiz
-- Почему пароль от базы данных хранят в `.env`, а не в коде `server.js`?
-- Что делает `import 'dotenv/config'` без `from`?
-- Что произойдёт с `dotenv`, если `.env`-файла вообще нет на сервере, а переменные заданы другим способом?
+- Чем `worker_threads` отличается от простого `async`/`await` — почему `await slowSum(...)` само по себе не решило бы проблему блокировки?
+- Как главный поток получает результат от воркера?
+- Что не может воркер напрямую, в отличие от обычной функции в том же потоке?
 
 ### links
-- https://www.npmjs.com/package/dotenv | документация dotenv | npm: dotenv
+- https://nodejs.org/api/worker_threads.html | справочник по worker_threads | Node.js: Worker threads
 
-## 4.6 🔨 Сломать → починить: ошибка без обработчика | short: Сломать → починить | est: ~25 мин
+## 4.4 cluster: несколько процессов на одном порту | short: cluster | est: ~25 мин
+### intro
+**Слова шага:** `cluster` — модуль для запуска нескольких копий (воркеров-процессов, не потоков) одной программы, слушающих один порт; *master-процесс* — тот, что порождает и перезапускает воркеров; *round-robin* — ОС/Node по очереди раздаёт новые соединения воркерам.
+
+`worker_threads` — потоки **внутри одного процесса** (общий процесс, своя память на поток). **`cluster`** — наоборот, несколько **процессов**, каждый со своей полной копией памяти, слушающих один и тот же порт:
+
+**Файл:** `cluster-demo.js`.
+
+```bash run
+cat > cluster-demo.js <<'EOF'
+import cluster from 'node:cluster'
+import { createServer } from 'node:http'
+import { cpus } from 'node:os'
+
+if (cluster.isPrimary) {
+  console.log('мастер-процесс, pid:', process.pid)
+  const n = Math.min(2, cpus().length)
+  for (let i = 0; i < n; i++) cluster.fork()
+  cluster.on('exit', (worker) => console.log('воркер завершился, pid:', worker.process.pid))
+} else {
+  createServer((req, res) => res.end(`ответил воркер, pid: ${process.pid}\n`)).listen(3302)
+}
+EOF
+timeout 3 node cluster-demo.js &
+sleep 1
+curl -s http://localhost:3302/
+curl -s http://localhost:3302/
+curl -s http://localhost:3302/
+wait
+```
+
+**Разбор.** `cluster.isPrimary` — true только в главном (master) процессе; он сам ничего не слушает, а порождает воркеров через `cluster.fork()` — каждый воркер выполняет этот же файл заново, но попадает в ветку `else`. Node и ОС сами распределяют входящие соединения между воркерами — три запроса подряд вполне могут попасть на разные `pid`.
+
+### why
+`cluster` — то, как Node использует несколько ядер процессора: один процесс Node — один поток для JS (не считая `worker_threads`), но несколько *процессов* `cluster` — это несколько независимых event loop на разных ядрах, за одним портом. Для ShareBox в учебных масштабах не нужен, но важно понимать разницу: `worker_threads` — для одной тяжёлой задачи, `cluster` — чтобы использовать все ядра сервера сразу под обычную нагрузку (ближе к тому, что в проде под капотом делает Node-оркестрация или сам процесс-менеджер).
+
+### deep Если не получилось
+- **Все ответы с одним и тем же `pid`** — при малом числе запросов распределение не обязано быть идеально равномерным; это не ошибка, увеличь число `curl`-вызовов.
+- **`timeout 3` не найден** — на части систем нет `timeout`; тогда убери его и останавливай процесс `kill %1` после проверки.
+
+### quiz
+- Чем процесс `cluster`-воркера отличается от потока `worker_threads` — что у них общее, а что раздельное (память)?
+- Что делает `cluster.isPrimary` и что происходит в ветке `else`?
+- Если нужно разогнать одну тяжёлую CPU-задачу — `cluster` или `worker_threads`? А если нужно использовать все ядра сервера под обычный поток запросов?
+
+### links
+- https://nodejs.org/api/cluster.html | справочник по cluster | Node.js: Cluster
+
+## 4.5 🔨 Сломать → починить: хеш большого файла блокирует сервер | short: Сломать → починить | est: ~30 мин
 ### intro
 :::trap Сломать → починить
-Соберём всё из сессии в постоянный каркас — error handler, свои ошибки, zod, слои, `.env` — и нарочно забудем зарегистрировать error handler, чтобы увидеть разницу.
+Посчитай `sha256` большого файла синхронным циклом прямо в обработчике запроса (сессия 3 уже умеет считать хеш, но не на 100 МБ разом) — и увидь, как это блокирует остальной сервер. Почини через `worker_threads`.
 :::
 
-Сначала — без error handler, роут кидает `NotFoundError`:
-
-**Файлы:** `src/services/files.service.js`, `src/controllers/files.controller.js`, `src/routes/files.routes.js`, `server.js`.
+**Файлы:** `hash-blocking-server.js`.
 
 ```bash run
-cat > src/services/files.service.js <<'EOF'
-import { NotFoundError } from '../../lib/errors.js'
+head -c 100000000 /dev/urandom > upload-demo.bin
+cat > hash-blocking-server.js <<'EOF'
+import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 
-const demoFiles = new Map([['abc123', { id: 'abc123', name: 'report.pdf' }]])
-
-export function getFileOrThrow(id) {
-  const file = demoFiles.get(id)
-  if (!file) throw new NotFoundError(`файл ${id} не найден`)
-  return file
-}
+const server = createServer((req, res) => {
+  if (req.url === '/hash') {
+    const data = readFileSync('upload-demo.bin')
+    const hash = createHash('sha256').update(data).digest('hex')
+    res.end(hash + '\n')
+    return
+  }
+  res.end('быстрый ответ\n')
+})
+server.listen(3303, () => console.log('hash-blocking-server на 3303'))
 EOF
-cat > src/controllers/files.controller.js <<'EOF'
-import { getFileOrThrow } from '../services/files.service.js'
-
-export function getFile(req, res) {
-  const file = getFileOrThrow(req.params.id)
-  res.json(file)
-}
-EOF
-cat > src/routes/files.routes.js <<'EOF'
-import { Router } from 'express'
-import { getFile } from '../controllers/files.controller.js'
-
-const router = Router()
-router.get('/files/:id', getFile)
-export default router
-EOF
-cat > server.js <<'EOF'
-import express from 'express'
-import healthRoutes from './src/routes/health.routes.js'
-import filesRoutes from './src/routes/files.routes.js'
-
-const app = express()
-app.use(express.json())
-app.use(healthRoutes)
-app.use(filesRoutes)
-
-const PORT = process.env.PORT || 3000
-app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
-EOF
-node server.js &
+node hash-blocking-server.js &
 SERVER_PID=$!
 sleep 1
-curl -s -o /dev/null -w 'без error handler, нет такого файла: %{http_code}\n' http://localhost:3000/files/нет-такого
+(curl -s http://localhost:3303/hash &)
+sleep 0.2
+time curl -s http://localhost:3303/
 kill $SERVER_PID
 ```
 
-**Почини** — допиши единый error handler с учётом `AppError`, и `.env` для порта:
+**Почини** — вынеси хеширование в `worker_threads` (тот же приём, что в шаге 4.3):
 
-**Файл:** `server.js` (дописать).
+**Файлы:** `hash-worker.js`, `hash-worker-server.js`.
 
 ```bash run
-cat >> server.js <<'EOF'
+cat > hash-worker.js <<'EOF'
+import { parentPort, workerData } from 'node:worker_threads'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 
-app.use((req, res) => {
-  res.status(404).json({ error: 'not_found' })
-})
-
-app.use((err, req, res, next) => {
-  console.error('поймано:', err.message)
-  if (err.status) {
-    res.status(err.status).json({ error: err.message })
-  } else {
-    res.status(500).json({ error: 'internal', message: 'что-то пошло не так' })
-  }
-})
+const data = readFileSync(workerData.path)
+parentPort.postMessage(createHash('sha256').update(data).digest('hex'))
 EOF
-node server.js &
+cat > hash-worker-server.js <<'EOF'
+import { createServer } from 'node:http'
+import { Worker } from 'node:worker_threads'
+
+function hashInWorker(path) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./hash-worker.js', import.meta.url), { workerData: { path } })
+    worker.on('message', resolve)
+    worker.on('error', reject)
+  })
+}
+
+const server = createServer(async (req, res) => {
+  if (req.url === '/hash') {
+    const hash = await hashInWorker('upload-demo.bin')
+    res.end(hash + '\n')
+    return
+  }
+  res.end('быстрый ответ\n')
+})
+server.listen(3304, () => console.log('hash-worker-server на 3304'))
+EOF
+node hash-worker-server.js &
 SERVER_PID=$!
 sleep 1
-curl -s http://localhost:3000/files/abc123
-echo
-curl -s -o /dev/null -w 'после починки, нет такого файла: %{http_code}\n' http://localhost:3000/files/нет-такого
+(curl -s http://localhost:3304/hash &)
+sleep 0.2
+time curl -s http://localhost:3304/
 kill $SERVER_PID
 ```
 
@@ -388,21 +303,17 @@ kill $SERVER_PID
 ```
 
 ### why
-До починки `NotFoundError` долетала до встроенного обработчика Express по умолчанию — клиент видел `500` и HTML-страницу вместо понятного `404`. После — `AppError.status` сам решает код ответа, а структура (routes/controllers/services) и `.env` остаются готовым каркасом для всех следующих сессий.
-
-### deep Если не получилось
-- **Всё ещё `500` вместо `404` после починки** — error handler добавлен, но не **последним** в `server.js`, или `NotFoundError` создана без `status` (сверь `lib/errors.js` из шага 4.2).
-- **`Cannot find module '../../lib/errors.js'`** — считай уровни вложенности от файла: `src/services/files.service.js` до `lib/errors.js` — на два уровня выше (`../../`), а не один.
+ShareBox считает `sha256` каждого загруженного файла (сессия 15, до 200 МБ) — если делать это синхронным `createHash(...).update(readFileSync(...))` прямо в обработчике, сервер замрёт для всех на время хеширования. Вынос в `worker_threads` — то самое решение, которое ляжет в реальный код ShareBox.
 
 ### quiz
-- Что именно изменилось в ответе сервера до и после регистрации error handler?
-- Почему `err.status` появляется только у `AppError` и его потомков, а не у любой ошибки?
-- Если добавить ещё один роут, который бросает `ForbiddenError`, что нужно поменять в error handler?
+- Что именно блокировало сервер в первом варианте — чтение файла или сам хеш, и как это проверить?
+- Почему вынос хеширования в воркер не ускоряет сам хеш, но решает проблему?
+- Какой ещё способ из шага 4.1 (`child_process`) мог бы справиться с этой же задачей, вызвав системную утилиту `sha256sum`?
 
 ### outro
 :::tip Приёмка сессии 4
-Ты можешь: написать единый обработчик ошибок и объяснить, по какому признаку Express его находит; создать иерархию своих классов ошибок со статусом; проверить данные схемой zod через `safeParse`; разложить код на routes/controllers/services и объяснить направление зависимостей; вынести конфигурацию в `.env` через `dotenv`. В `/work/sharebox` — структура `src/routes`, `src/controllers`, `src/services`, `lib/errors.js`, `.env`, `src/config.js`.
+Ты можешь: запустить внешнюю команду через `child_process` и прочитать её вывод и код выхода; показать и объяснить, как синхронный CPU-bound код блокирует event loop для всех запросов; вынести тяжёлое вычисление в `worker_threads` и получить результат через сообщения; объяснить разницу между `worker_threads` (потоки, один процесс) и `cluster` (несколько процессов на одном порту); починить реальный случай блокировки — хеширование файла. В `/work/sharebox`: `spawn-demo.js`, `blocking-server.js`, `sum-worker.js` + `worker-server.js`, `cluster-demo.js`, `hash-worker.js` + `hash-worker-server.js`.
 :::
 
 ### links
-- https://expressjs.com/en/guide/error-handling.html | обработка ошибок, ещё раз с практикой | Express: Error Handling
+- https://nodejs.org/en/docs/guides/dont-block-the-event-loop/ | развёрнутый гайд по CPU-bound задачам | Node.js: CPU-bound tasks

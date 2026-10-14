@@ -1,405 +1,108 @@
-# Сессия 10 · Админ и надёжность
+# Сессия 10 · REST и контракт API
 dur: ~4 ч
 
-## 10.1 Роль admin и middleware по роли | short: Роль admin | est: ~25 мин
+## 10.1 Ресурсы, а не глаголы | short: Ресурсы в URL | est: ~25 мин
 ### intro
-**Слова шага:** *роль (role)* — поле пользователя (например, `"admin"`), по которому решают доступ; `requireRole` — middleware, пропускающее только пользователей с нужной ролью; *композиция middleware* — несколько проверок подряд, каждая отвечает за одно (`requireAuth` + `requireRole`).
+**Слова шага:** *ресурс* — существительное, которым называется URL (`/files`, а не `/getFiles`); *вложенный ресурс* — ресурс внутри другого (`/files/:id/shares` — ссылки конкретного файла); *REST* — стиль проектирования API, где действие определяет метод (`GET`/`POST`/...), а URL называет **что**, а не **что сделать**.
 
-Добавим пользователям роль и middleware, который проверяет не только «есть токен» (`requireAuth`, сессия 7), но и «эта роль разрешена»:
+Сервер из сессии 9 уже отвечает на `/files` методом. Это и есть ключевая идея REST: **URL называет ресурс**, а не действие — действие сообщает метод. `/getFiles` или `/createFile` — не REST (действие дублируется и в URL, и в методе); `GET /files` и `POST /files` — REST (один URL, разный смысл по методу).
 
-Добавить поле в модель `User` — точечная правка текстового файла; надёжнее не угадывать `sed`-выражением, а явным скриптом, который ищет строку и вставляет рядом (тот же приём, что в сессии 6.5):
+Спроектируем ресурсы ShareBox как в её ТЗ — без кода, просто таблицей:
 
-**Файлы:** `add-role-field.js`, `lib/role-middleware.js`.
+```text
+/files              — коллекция файлов текущего пользователя
+/files/:id          — один файл
+/files/:id/shares    — вложенный ресурс: ссылки конкретного файла
+/shares/:id          — одна ссылка (не вложена под /files — у неё своя жизнь: отзыв, статистика)
+/s/:code             — публичный ресурс по короткому коду, не требует входа
+```
+
+### result
+```out auto
+```
+
+### why
+`/files/:id/shares` вложен, а `/shares/:id` — нет: вложенность отражает **создание** (ссылка создаётся через файл, `POST /files/:id/shares`), а не постоянную принадлежность (дальше со ссылкой работают по её собственному `id`, без файла в URL). Ошибка в проектировании ресурсов на старте стоит дорого — переделывать клиентский код под переименованные URL сложнее, чем один раз продумать вложенность.
+
+### deep Если не получилось
+- **Хочется один глубокий путь на всё** (`/users/:id/files/:id/shares/:id/stats`) — вложенность REST редко идёт глубже одного уровня; растущая глубина — сигнал, что часть пути должна стать отдельным ресурсом со своим `id` (как `/shares/:id` здесь).
+
+### quiz
+- Чем `/getFiles` хуже, чем `GET /files`, с точки зрения REST?
+- Почему `/files/:id/shares` вложен, а `/shares/:id` — нет?
+- Какой ресурс не требует авторизации и почему это видно уже по его URL (`/s/:code`)?
+
+### links
+- https://restfulapi.net/resource-naming/ | именование ресурсов в REST | RESTful API: Resource Naming
+
+## 10.2 Идемпотентность на практике | short: Идемпотентность | est: ~25 мин
+### intro
+**Слова шага:** *идемпотентный запрос* — повторённый с теми же параметрами, не меняет результат второй раз; *небезопасное дублирование* — повторный `POST` из-за обрыва связи создаёт вторую сущность, которую никто не хотел.
+
+Сессия 3.2 уже назвала идемпотентность по имени. Теперь — зачем это важно на практике: клиент ShareBox теряет связь после отправки `POST /files/:id/shares` (создание ссылки), не получив ответ — и **не знает**, создалась ли ссылка. Если просто повторить запрос — получится две ссылки на один файл с разными кодами.
+
+Решение — **идемпотентный ключ**: клиент сам генерирует уникальный идентификатор операции и присылает его заголовком; сервер запоминает, какие ключи уже обработал, и на повтор с тем же ключом отдаёт **тот же** результат, не создавая вторую сущность:
+
+**Файл:** `lib/idempotency.js`.
 
 ```bash run
 cd /work/sharebox
-cat > add-role-field.js <<'EOF'
-import { readFileSync, writeFileSync } from 'node:fs'
-let schema = readFileSync('prisma/schema.prisma', 'utf8')
-if (!schema.includes('role ')) {
-  schema = schema.replace(
-    'passwordHash String   @map("password_hash")',
-    'passwordHash String   @map("password_hash")\n  role         String   @default("user")'
-  )
-  writeFileSync('prisma/schema.prisma', schema)
-}
-console.log('готово')
-EOF
-node add-role-field.js
-npx prisma migrate dev --name add_user_role
-cat > lib/role-middleware.js <<'EOF'
-import { AppError } from './errors.js'
-import { prisma } from '../src/prisma.js'
+cat > lib/idempotency.js <<'EOF'
+const seen = new Map() // ключ -> уже посчитанный результат
 
-export function requireRole(role) {
-  return async (req, res, next) => {
-    const user = await prisma.user.findUnique({ where: { id: req.user.id } })
-    if (!user || user.role !== role) return next(new AppError('недостаточно прав', 403))
-    next()
-  }
+export function withIdempotency(key, compute) {
+  if (seen.has(key)) return { result: seen.get(key), repeated: true }
+  const result = compute()
+  seen.set(key, result)
+  return { result, repeated: false }
 }
 EOF
-```
+node -e "
+import('./lib/idempotency.js').then(({ withIdempotency }) => {
+  let created = 0
+  const makeShare = () => { created += 1; return { code: 'abc' + created } }
 
-### result
-```out auto
-```
+  const first = withIdempotency('key-1', makeShare)
+  const second = withIdempotency('key-1', makeShare)
+  const third = withIdempotency('key-2', makeShare)
 
-### why
-`requireRole('admin')` — пример **композиции** middleware: `requireAuth` узнаёт, кто это, `requireRole('admin')` после него проверяет, что роль подходит — две независимые проверки, каждая делает одно дело (принцип единственной ответственности, пригодится и за пределами этой лабы).
-
-### deep Если не получилось
-- **`role` не появилось в базе** — `add-role-field.js` меняет только файл схемы; `npx prisma migrate dev` сразу следом применяет это к реальным таблицам.
-- **Скрипт ничего не изменил при повторном запуске** — так и задумано: проверка `if (!schema.includes('role '))` делает правку безопасной для повторного выполнения (идемпотентной) — не продублирует поле, если оно уже есть.
-
-### quiz
-- В каком порядке должны стоять `requireAuth` и `requireRole('admin')` в цепочке middleware и почему именно в этом?
-- Что произойдёт, если `requireRole('admin')` стоит на роуте без `requireAuth` перед ним?
-- Как добавить новую роль, например `'moderator'`, если понадобится позже?
-
-### links
-- https://www.prisma.io/docs/orm/prisma-migrate/workflows/schema-evolution | эволюция схемы | Prisma Docs: Schema evolution
-
-## 10.2 Админ-роуты | short: /admin/* | est: ~25 мин
-### intro
-**Слова шага:** `/admin/*` — префикс админских роутов, защищённых `requireRole('admin')`; *список всех файлов* — файлы всех пользователей, не только своих; *принудительное удаление* — удаление чужого файла без проверки владельца.
-
-Соберём пару админ-роутов: список всех файлов в системе (не только своих) и удаление любого файла.
-
-**Файлы:** `src/services/admin.service.js`, `src/controllers/admin.controller.js`, `src/routes/admin.routes.js`.
-
-```bash run
-cat > src/services/admin.service.js <<'EOF'
-import { prisma } from '../prisma.js'
-
-export async function listAllFiles() {
-  const files = await prisma.file.findMany({ include: { owner: { select: { email: true } } } })
-  return files.map((f) => ({ id: f.id, name: f.name, owner: f.owner.email, size: Number(f.sizeBytes) }))
-}
-
-export async function forceDeleteFile(fileId) {
-  await prisma.file.delete({ where: { id: fileId } })
-  return { deleted: true }
-}
-EOF
-cat > src/controllers/admin.controller.js <<'EOF'
-import { listAllFiles, forceDeleteFile } from '../services/admin.service.js'
-
-export async function getAllFiles(req, res) {
-  res.json(await listAllFiles())
-}
-
-export async function adminDeleteFile(req, res) {
-  res.json(await forceDeleteFile(Number(req.params.id)))
-}
-EOF
-cat > src/routes/admin.routes.js <<'EOF'
-import { Router } from 'express'
-import { getAllFiles, adminDeleteFile } from '../controllers/admin.controller.js'
-import { requireAuth } from '../../lib/auth-middleware.js'
-import { requireRole } from '../../lib/role-middleware.js'
-
-const router = Router()
-router.use('/admin', requireAuth, requireRole('admin'))
-router.get('/admin/files', getAllFiles)
-router.delete('/admin/files/:id', adminDeleteFile)
-export default router
-EOF
-echo "роуты готовы; подключим к server.js и проверим в шаге 10.6 вместе с остальным"
-```
-
-### result
-```out
-(файлы подготовлены; подключение к server.js и проверка запуском — в шаге 10.6)
-```
-
-### why
-`router.use('/admin', requireAuth, requireRole('admin'))` — применяет обе проверки **ко всем** роутам, начинающимся с `/admin`, одной строкой, вместо повторения в каждом роуте отдельно — Express позволяет вешать middleware на префикс пути, не только глобально (сессия 3.4) или на конкретный роут (сессия 7.4).
-
-### deep Если не получилось
-- **`requireRole` не определён** — модуль создан в предыдущем шаге 10.1; если шаги выполнялись не по порядку, вернись туда.
-- **Хочется проверить роут сейчас** — он подключится к `server.js` в 10.6 вместе с остальными темами сессии, чтобы не переписывать `server.js` пять раз подряд.
-
-### quiz
-- Что делает `router.use('/admin', ...)` в отличие от `router.get('/admin/files', ...)`?
-- Какие два middleware применяются ко всем `/admin/*`-роутам и в каком порядке?
-- Почему `forceDeleteFile` не проверяет владельца, в отличие от `deleteOwnedFile` из сессии 7?
-
-### links
-- https://expressjs.com/en/api.html#router.use | router.use с префиксом | Express: router.use
-
-## 10.3 Rate limit на публичные ссылки | short: Rate limit | est: ~25 мин
-### intro
-**Слова шага:** *rate limit* — ограничение числа запросов с одного источника за промежуток времени; `express-rate-limit` — пакет, реализующий это ограничение как middleware; `429 Too Many Requests` — код ответа при превышении лимита.
-
-`/s/:code` (сессия 9) доступен без авторизации — значит, его может дёргать скрипт тысячи раз в секунду, перебирая коды или просто нагружая сервер. **Rate limit** — ограничение числа запросов с одного источника за промежуток времени.
-
-**Файл:** `rate-limit-demo.js`.
-
-```bash run
-npm install express-rate-limit
-cat > rate-limit-demo.js <<'EOF'
-import express from 'express'
-import rateLimit from 'express-rate-limit'
-
-const app = express()
-const limiter = rateLimit({ windowMs: 10_000, limit: 3, standardHeaders: true, legacyHeaders: false })
-app.use('/s', limiter)
-app.get('/s/:code', (req, res) => res.json({ code: req.params.code }))
-app.listen(3000, () => console.log('демо-сервер слушает 3000'))
-EOF
-node rate-limit-demo.js &
-SERVER_PID=$!
-sleep 1
-for i in 1 2 3 4 5; do
-  curl -s -o /dev/null -w "запрос $i: %{http_code}\n" http://localhost:3000/s/anycode
-done
-kill $SERVER_PID
-```
-
-**Разбор.** `windowMs: 10_000, limit: 3` — не больше 3 запросов за 10 секунд с одного IP. `standardHeaders: true` — отдаёт заголовки `RateLimit-*` с остатком лимита (клиент может их читать и не дёргать сервер зря); `legacyHeaders: false` — отключает старый вариант этих же заголовков (`X-RateLimit-*`), чтобы не дублировать.
-
-### result
-```out auto
-```
-
-### why
-Без rate limit один скрипт может перебирать коды share-ссылок (сессия 9.1: `nanoid(8)` — большое, но не бесконечное пространство) или просто забить сервер запросами. Лимит не останавливает атаку полностью, но делает перебор на порядки медленнее и заметнее в логах.
-
-### deep Если не получилось
-- **Все 5 запросов вернули `200`** — лимит считается по IP; если тесты запускаются через `--network host` или похожую настройку, все запросы могут идти с одного и того же адреса, что и ожидается — тогда 4-й и 5-й должны были дать `429`; если нет, проверь, что `limiter` подключён именно к `/s`, а не к другому пути.
-- **Лимит слишком строгий для реальной работы** — `windowMs`/`limit` настраиваются под ожидаемую нагрузку; значения в примере — учебные, для демонстрации за секунды, не прод-значения.
-
-### quiz
-- Что означают `windowMs: 10_000, limit: 3` вместе?
-- Какой код ответа получит четвёртый запрос за 10 секунд при этом лимите?
-- От какого класса проблем rate limit защищает, а от какого — нет (например, от атаки с тысяч разных IP)?
-
-### links
-- https://express-rate-limit.mintlify.app/overview | документация express-rate-limit | express-rate-limit: Overview
-
-## 10.4 helmet, CORS, pino-логи | short: helmet, CORS, логи | est: ~25 мин
-### intro
-**Слова шага:** `helmet` — middleware, выставляющее защитные HTTP-заголовки по умолчанию; `cors` — middleware, разрешающее запросы с других доменов; *структурированные логи* — записи лога в машиночитаемом формате (JSON); `pino` — быстрый логгер, который их пишет.
-
-Три независимых middleware для надёжности прода: **helmet** выставляет защитные HTTP-заголовки по умолчанию; **cors** разрешает запросы с других доменов (нужно, если фронтенд ShareBox когда-нибудь будет жить отдельно); **pino** — быстрый структурированный логгер (JSON вместо `console.log`-строк — такие логи удобно fильтровать и парсить).
-
-**Файл:** `security-demo.js`.
-
-```bash run
-npm install helmet cors pino pino-http
-cat > security-demo.js <<'EOF'
-import express from 'express'
-import helmet from 'helmet'
-import cors from 'cors'
-import pinoHttp from 'pino-http'
-
-const app = express()
-app.use(helmet())
-app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }))
-app.use(pinoHttp())
-
-app.get('/check', (req, res) => res.json({ ok: true }))
-app.listen(3000, () => console.log('демо-сервер слушает 3000'))
-EOF
-node security-demo.js &
-SERVER_PID=$!
-sleep 1
-curl -s -D - http://localhost:3000/check -o /dev/null | grep -iE 'x-content-type-options|x-frame-options|access-control'
-kill $SERVER_PID
-```
-
-### result
-```out auto
-```
-
-### why
-`helmet()` закрывает несколько известных классов атак одной строкой (например, `X-Content-Type-Options: nosniff` мешает браузеру угадывать тип файла не по заголовку, а по содержимому — источник части XSS-уязвимостей). `pino-http` автоматически логирует каждый запрос структурированной JSON-строкой — в проде такие логи уходят в систему агрегации логов и по ним ищут, а не читают глазами построчно, как `console.log`.
-
-### deep Если не получилось
-- **`cors` блокирует запросы, хотя `origin: '*'`** — `*` разрешает все источники, но **не** работает вместе с `credentials: true` (куки/авторизация) — браузер такое сочетание отклоняет по спецификации; для ShareBox с токенами в заголовке (не в куках) это не проблема.
-- **Логи pino выглядят как «нечитаемый JSON»** — это ожидаемо и правильно для прода; при разработке к `pino-http` добавляют `pino-pretty` для читаемого вывода в терминале (за пределами паспорта этой лабы, но легко гуглится при желании).
-
-### quiz
-- Что делает `helmet()` одной строкой вместо ручной настройки заголовков?
-- Чем структурированный лог (JSON) удобнее для прода, чем `console.log`-строка?
-- Почему `cors({ origin: '*' })` не сочетается с куки-авторизацией?
-
-### links
-- https://helmetjs.github.io/ | документация helmet | Helmet.js
-- https://getpino.io/ | документация pino | Pino: Documentation
-
-## 10.5 Graceful shutdown, health/ready | short: Graceful shutdown | est: ~25 мин
-### intro
-**Слова шага:** *graceful shutdown* — корректная остановка: доделать начатые запросы, потом выйти; `SIGTERM` — сигнал операционной системы «пора завершиться»; `/health` vs `/ready` — жив ли процесс vs готов ли принимать трафик (например, подключена ли база); *in-flight запрос* — запрос, который уже обрабатывается в момент остановки.
-
-Когда процесс ShareBox останавливают (деплой новой версии, перезапуск контейнера), ему присылают сигнал `SIGTERM`. Без обработки Node завершится немедленно, оборвав запросы, которые как раз были в процессе (**in-flight**). **Graceful shutdown** — поймать сигнал, перестать принимать новые запросы, доделать уже начатые, потом выйти.
-
-Заодно добавим в ShareBox настоящий `/ready`: `/health` (сессия 3.6) отвечает всегда, пока жив процесс, а `/ready` — только если приложение реально готово обслуживать трафик (здесь — подключена база):
-
-**Файлы:** `src/services/health.service.js`, `src/controllers/health.controller.js`, `src/routes/health.routes.js`, `shutdown-demo.js`.
-
-```bash run
-cat > src/services/health.service.js <<'EOF'
-import { prisma } from '../prisma.js'
-
-export function getHealthStatus() {
-  return { status: 'ok', uptime: process.uptime() }
-}
-
-export async function getReadyStatus() {
-  await prisma.$queryRaw`SELECT 1`
-  return { status: 'ready' }
-}
-EOF
-cat > src/controllers/health.controller.js <<'EOF'
-import { getHealthStatus, getReadyStatus } from '../services/health.service.js'
-
-export function healthCheck(req, res) {
-  res.json(getHealthStatus())
-}
-
-export async function readyCheck(req, res) {
-  await getReadyStatus()
-  res.json({ status: 'ready' })
-}
-EOF
-cat > src/routes/health.routes.js <<'EOF'
-import { Router } from 'express'
-import { healthCheck, readyCheck } from '../controllers/health.controller.js'
-
-const router = Router()
-router.get('/health', healthCheck)
-router.get('/ready', readyCheck)
-export default router
-EOF
-node server.js &
-SERVER_PID=$!
-sleep 1
-curl -s http://localhost:3000/health
-echo
-curl -s http://localhost:3000/ready
-echo
-kill $SERVER_PID
-cat > shutdown-demo.js <<'EOF'
-import express from 'express'
-
-const app = express()
-app.get('/slow', async (req, res) => {
-  await new Promise((resolve) => setTimeout(resolve, 2000))
-  res.json({ done: true })
+  console.log('первый вызов:', first, 'создано всего:', created)
+  console.log('повтор тем же ключом:', second, 'создано всего:', created)
+  console.log('другой ключ:', third, 'создано всего:', created)
 })
-
-const server = app.listen(3000, () => console.log('демо-сервер слушает 3000'))
-
-process.on('SIGTERM', () => {
-  console.log('получен SIGTERM, перестаю принимать новые запросы')
-  server.close(() => {
-    console.log('все активные запросы завершены, выхожу')
-    process.exit(0)
-  })
-})
-EOF
-node shutdown-demo.js &
-SERVER_PID=$!
-sleep 1
-curl -s http://localhost:3000/slow &
-sleep 0.3
-kill -TERM $SERVER_PID
-wait $SERVER_PID 2>/dev/null
-echo "процесс завершился кодом: $?"
+"
 ```
+
+**Разбор.** `seen.has(key)` — проверка ДО вычисления: если ключ уже видели, `compute()` вообще не вызывается повторно — `created` не увеличится. Третий вызов с новым ключом (`key-2`) — честно создаёт новую сущность. В реальном ShareBox `seen` будет таблицей в базе (сессия 12), а не `Map` в памяти (переживёт перезапуск процесса).
 
 ### result
 ```out auto
 ```
 
 ### why
-`getReadyStatus` делает реальный запрос к базе (`SELECT 1`) — если Postgres недоступна, запрос упадёт исключением, которое долетит до единого error handler (сессия 4) и вернёт `500`, а не `200`: оркестратор (Kubernetes, Docker Swarm) использует именно такую проверку, чтобы не присылать трафик на инстанс, у которого ещё не поднялось соединение с базой при старте. Отдельно от этого — graceful shutdown: без `server.close()` в обработчике `SIGTERM`, запрос `/slow`, стартовавший перед остановкой, получил бы оборванное соединение вместо ответа — для скачивания файла (сессия 8) это означало бы повреждённый файл у получателя в момент каждого деплоя. `server.close()` перестаёт принимать **новые** соединения, но ждёт, пока текущие доделаются.
+`POST /files/:id/shares` в сессии 16 примет необязательный заголовок `Idempotency-Key`: повтор с тем же ключом (клиент решил, что первый запрос не долетел) вернёт ту же уже созданную ссылку, а не создаст вторую. Для публичного скачивания (`GET`/`DELETE`) идемпотентность — уже свойство самого метода (сессия 3.2), отдельный ключ не нужен.
 
 ### deep Если не получилось
-- **`/ready` всегда отвечает `200`, даже если явно оборвать Postgres** — проверь, что `getReadyStatus` реально ждёт (`await`) результат запроса, а не просто вызывает `prisma.$queryRaw` без `await` (тогда ошибка никуда не долетит до ответа).
-- **Процесс не завершается, зависает** — `server.close(callback)` ждёт завершения **всех** активных соединений; если где-то остался незакрытый долгоживущий запрос (например, зависший `fetch` без таймаута), `close` будет ждать его бесконечно — в проде для этого добавляют таймаут на принудительное завершение.
-- **`$?` показывает не `0`** — проверь, что `process.exit(0)` действительно вызван внутри колбэка `server.close(...)`, а не сразу после (это привело бы к выходу до завершения запроса).
+- **Результат отличается при повторе одним и тем же ключом** — `compute()` вызван до проверки `seen.has(key)`, а не после; сверь порядок в `withIdempotency`.
 
 ### quiz
-- Что произойдёт с активным запросом `/slow`, если не обрабатывать `SIGTERM` вообще?
-- В чём разница между `/health` (жив ли процесс) и `/ready` (готов ли принимать трафик, например — подключена ли база)?
-- Почему `server.close()` не обрывает уже начатые запросы, а только блокирует новые?
+- Зачем идемпотентный ключ нужен именно для `POST`, но не нужен для `GET`/`DELETE`?
+- Что произойдёт, если `compute()` вызвать раньше проверки `seen.has(key)`?
+- Где в реальном ShareBox будет храниться `seen` вместо `Map`, и почему это важно при перезапуске процесса?
 
 ### links
-- https://nodejs.org/api/net.html#serverclosecallback | server.close | Node.js: net.Server
+- https://stripe.com/docs/api/idempotent_requests | идемпотентные ключи на практике (Stripe API) | Stripe API: Idempotent requests
 
-## 10.6 Чистка просроченного, сборка сессии | short: Чистка и сборка | est: ~25 мин
+## 10.3 Версии API | short: Версионирование | est: ~20 мин
 ### intro
-**Слова шага:** *фоновая задача* — код, который выполняется сам по расписанию, а не по запросу клиента; `setInterval` — запустить функцию повторно через равные промежутки времени; *чистка просроченных данных* — удаление истёкших share-ссылок, которые больше не нужны.
+**Слова шага:** *версионирование API* — явный способ менять контракт, не ломая уже написанных клиентов; *версия в пути* (`/v1/files`) — самый явный и частый способ; *версия в заголовке* (`Accept: application/vnd.sharebox.v1+json`) — тоньше, но менее заметна разработчику клиента.
 
-Истёкшие share-ссылки (сессия 9.2) и их файлы со временем копятся. Напишем периодическую задачу и соберём всю сессию 10 в `server.js`:
+Рано или поздно формат ответа придётся менять несовместимо (например, переименовать поле). Если клиенты уже написаны под старый формат — нужен способ не сломать их разом. ShareBox выбирает самый явный вариант — версия в пути:
 
-**Файлы:** `src/services/cleanup.service.js`, `server.js`.
-
-```bash run
-cat > src/services/cleanup.service.js <<'EOF'
-import { prisma } from '../prisma.js'
-
-export async function cleanupExpiredShares() {
-  const result = await prisma.share.deleteMany({ where: { expiresAt: { lt: new Date() } } })
-  if (result.count) console.log(`очищено просроченных ссылок: ${result.count}`)
-  return result.count
-}
-EOF
-cat > server.js <<'EOF'
-import express from 'express'
-import helmet from 'helmet'
-import cors from 'cors'
-import pinoHttp from 'pino-http'
-import rateLimit from 'express-rate-limit'
-import healthRoutes from './src/routes/health.routes.js'
-import filesRoutes from './src/routes/files.routes.js'
-import authRoutes from './src/routes/auth.routes.js'
-import sharesRoutes from './src/routes/shares.routes.js'
-import adminRoutes from './src/routes/admin.routes.js'
-import { migrate } from './src/migrate.js'
-import { cleanupExpiredShares } from './src/services/cleanup.service.js'
-
-await migrate()
-
-const app = express()
-app.use(helmet())
-app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }))
-app.use(pinoHttp())
-app.use(express.json())
-app.use('/s', rateLimit({ windowMs: 60_000, limit: 30 }))
-
-app.use(healthRoutes)
-app.use(filesRoutes)
-app.use(authRoutes)
-app.use(sharesRoutes)
-app.use(adminRoutes)
-
-app.use((req, res) => res.status(404).json({ error: 'not_found' }))
-app.use((err, req, res, next) => {
-  console.error('поймано:', err.message)
-  res.status(err.status || 500).json({ error: err.message || 'internal' })
-})
-
-const PORT = process.env.PORT || 3000
-const server = app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
-
-const cleanupTimer = setInterval(cleanupExpiredShares, 60 * 60 * 1000)
-
-process.on('SIGTERM', () => {
-  clearInterval(cleanupTimer)
-  server.close(() => process.exit(0))
-})
-EOF
-node server.js &
-SERVER_PID=$!
-sleep 1
-curl -s http://localhost:3000/health
-echo
-curl -s -o /dev/null -w 'admin без токена: %{http_code}\n' http://localhost:3000/admin/files
-kill $SERVER_PID
+```text
+/v1/files
+/v1/files/:id
+/v1/auth/login
 ```
 
 ### result
@@ -407,21 +110,142 @@ kill $SERVER_PID
 ```
 
 ### why
-`setInterval(cleanupExpiredShares, 60 * 60 * 1000)` — раз в час, а не на каждый запрос: чистка — фоновая задача, не связанная с конкретным пользователем. `clearInterval` в обработчике `SIGTERM` — тоже часть graceful shutdown: без него процесс мог бы не завершиться, пока таймер жив.
+Версия в пути видна сразу в логах, в документации, в адресной строке при отладке — для учебного проекта и для большинства реальных API это самый практичный выбор. Версия в заголовке технически «чище» (URL ресурса не меняется от версии к версии), но требует, чтобы каждый клиент и каждый лог-анализатор умели читать этот заголовок — больше дисциплины, больше способов ошибиться незаметно.
+
+### deep Как ещё можно
+Можно вообще не версionировать явно, а только добавлять новые необязательные поля, никогда не удаляя и не переименовывая старые (контракт только расширяется). Это работает, пока правда ни разу не требуется ломающее изменение — для ShareBox это сработало бы для большинства правок, но не для всех.
 
 ### deep Если не получилось
-- **`admin/files` вернул `404`, а не `401`** — `adminRoutes` не подключён в `server.js`, или путь в `admin.routes.js` не совпадает; `404` значит, что Express вообще не нашёл такой роут.
-- **Сервер стартует медленнее обычного** — несколько `npm install` за сессию (`express-rate-limit`, `helmet`, `cors`, `pino`, `pino-http`) — это ожидаемо, не ошибка.
+- *(шаг без типичных ошибок запуска — это проектное решение, а не код)*
 
 ### quiz
-- Почему чистку просроченных ссылок запускают по таймеру, а не на каждый входящий запрос?
-- Что произойдёт при `SIGTERM`, если убрать `clearInterval(cleanupTimer)` из обработчика?
-- Что означает `admin без токена: 401` и какой middleware за это отвечает?
+- Почему версия в пути заметнее, чем версия в заголовке?
+- Что произойдёт со старыми клиентами, если breaking change внести без версии вообще?
+- Можно ли вообще не версionировать API, и при каком условии это работает?
+
+### links
+- https://www.freecodecamp.org/news/how-to-version-a-rest-api/ | подходы к версионированию API | freeCodeCamp: How to version a REST API
+
+## 10.4 Единый контракт ошибок | short: Контракт ошибок | est: ~25 мин
+### intro
+**Слова шага:** *контракт ошибки* — фиксированная форма тела ответа при любой ошибке, одна на всё API; `error` — короткий машиночитаемый код (`not_found`, `validation_failed`); `message` — человекочитаемое объяснение, не для программного разбора.
+
+Без единого контракта у каждого роута — свой формат ошибки, и клиенту приходится разбирать $N$ разных форм. ShareBox фиксирует одну форму на всё API:
+
+```text
+{ "error": "<короткий_код>", "message": "<человеку>" }
+```
+
+Проверим на уже существующем коде сессии 9 — какой код вернёт сервер на разные сценарии:
+
+```bash run
+curl -s -X POST -H 'Content-Type: application/json' -d '{"name":"","size":-1}' http://localhost:3400/files 2>/dev/null || echo "(сервер из сессии 5 не запущен в этом блоке — ниже видно саму форму ответа по коду сессии 5.4)"
+cat controllers/files.controller.js | grep -A1 "JSON.stringify({ error"
+```
+
+### result
+```out auto
+```
+
+### why
+`error: 'not_found'` — код, по которому клиентский код **может** принимать решения (`if (body.error === 'not_found') ...`), не разбирая текст на естественном языке; `message` — то, что можно показать человеку, но на него нельзя полагаться в коде (текст может измениться при правке формулировки). Это и есть форма, которую используют все обработчики ошибок дальше по курсу (сессии 11, 15, 17).
+
+### deep Если не получилось
+- *(шаг про соглашение, не про запуск кода — сверь сам код в `controllers/files.controller.js`, который уже вернул эту форму в сессии 5.4)*
+
+### quiz
+- Почему `error` должен быть коротким кодом, а не тем же текстом, что `message`?
+- Что может пойти не так, если клиентский код начнёт сравнивать `message` вместо `error`?
+- Какая форма ошибки уже встречалась в коде сессии 5 — совпадает ли она с этим контрактом?
+
+### links
+- https://blog.restcase.com/rest-api-error-handling-problem-details-response/ | единый формат ошибок в REST API | RestCase: Error handling
+
+## 10.5 OpenAPI: описываем ShareBox | short: OpenAPI | est: ~30 мин
+### intro
+**Слова шага:** `OpenAPI` (бывш. Swagger) — стандартный формат YAML/JSON-описания HTTP API: пути, методы, тела запросов/ответов, коды; *машиночитаемая документация* — по OpenAPI можно сгенерировать клиентский код, проверить запрос автоматически, построить интерактивную страницу документации.
+
+Опишем два уже существующих ресурса ShareBox в формате OpenAPI — не весь API (это отдельная практика после курса), а чтобы увидеть структуру формата:
+
+**Файл:** `openapi.yaml`.
+
+```bash run
+npm install -g @redocly/cli >/dev/null 2>&1 || true
+cat > openapi.yaml <<'EOF'
+openapi: 3.1.0
+info:
+  title: ShareBox API
+  version: "1.0"
+paths:
+  /v1/files:
+    get:
+      summary: Список своих файлов
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: integer }
+                    name: { type: string }
+                    size: { type: integer }
+  /v1/files/{id}:
+    get:
+      summary: Один файл по id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+        '404':
+          description: Не найден
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: not_found }
+                  message: { type: string }
+EOF
+node -e "
+import('node:fs/promises').then(async ({ readFile }) => {
+  const { parse } = await import('node:util') // просто показать, что файл валиден как текст
+  const text = await readFile('openapi.yaml', 'utf8')
+  console.log('строк в openapi.yaml:', text.split('\n').length)
+})
+"
+```
+
+**Разбор.** `paths` — ключ на каждый URL, внутри — ключ на каждый метод; `responses` — по коду состояния, с `schema` тела ответа. Описанный здесь `404` с полями `error`/`message` — ровно тот контракт из шага 10.4, теперь зафиксированный машиночитаемо: инструменты (Redoc, Swagger UI) соберут по этому файлу страницу документации без единой строчки HTML.
+
+### result
+```out auto
+```
+
+### why
+OpenAPI-описание ShareBox — часть финального артефакта части II (сессия 19): полный `openapi.yaml` на весь API, не на два ресурса, как здесь. Начинать стоит рано, по ходу написания роутов — описывать всё API постфактум в конце гораздо дольше и чаще расходится с реальным кодом.
+
+### deep Как ещё можно
+Генераторы вроде `swagger-jsdoc` собирают OpenAPI из комментариев прямо над роутами в коде — спецификация не расходится с кодом, потому что лежит рядом с ним. В этой лабе — отдельный файл, для ясности структуры формата.
+
+### deep Если не получилось
+- **`npm install -g @redocly/cli` не ставится** — не критично для шага (строка с `|| true` не прерывает блок); сам `openapi.yaml` — обычный текстовый YAML-файл, его можно проверить и без инструмента, прочитав глазами структуру `paths`/`responses`.
+
+### quiz
+- Что описывает ключ `paths` в OpenAPI, а что — `responses` внутри пути?
+- Как контракт ошибок из шага 10.4 отражается в этом файле?
+- Зачем описывать API по ходу написания роутов, а не одним файлом в самом конце?
 
 ### outro
 :::tip Приёмка сессии 10
-Ты можешь: добавить роль пользователю и защитить роут по роли; собрать админ-роуты с общим middleware на префикс; поставить rate limit и объяснить `429`; подключить `helmet`, `cors`, структурированные логи `pino`; реализовать graceful shutdown на `SIGTERM`; запустить периодическую фоновую задачу. ShareBox готов почти полностью — осталось сессия 11: тесты, Docker, финал.
+Ты можешь: называть ресурсы существительными, а не действиями, и решать, когда вложенность оправдана; объяснить, зачем нужен идемпотентный ключ для `POST`, и реализовать его простейшую версию; обосновать выбор версии API в пути, а не в заголовке; сформулировать единый контракт ошибок и узнать его в уже написанном коде; описать ресурс в OpenAPI и понимать структуру `paths`/`responses`. В `/work/sharebox`: `lib/idempotency.js`, `openapi.yaml`.
 :::
 
 ### links
-- https://expressjs.com/en/advanced/best-practice-performance.html | best practices Express для прода | Express: Production best practices
+- https://swagger.io/specification/ | полная спецификация OpenAPI | OpenAPI Specification
