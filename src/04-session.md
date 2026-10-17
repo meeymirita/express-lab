@@ -316,4 +316,4 @@ ShareBox считает `sha256` каждого загруженного фай�
 :::
 
 ### links
-- https://nodejs.org/en/docs/guides/dont-block-the-event-loop/ | развёрнутый гайд по CPU-bound задачам | Node.js: CPU-bound tasks
+- https://nodejs.org/learn/asynchronous-work/dont-block-the-event-loop | развёрнутый гайд по CPU-bound задачам | Node.js: CPU-bound tasks

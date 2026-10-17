@@ -58,7 +58,7 @@ EOF
 - Как добавить новую роль, например `'moderator'`, если понадобится позже?
 
 ### links
-- https://www.prisma.io/docs/orm/prisma-migrate/workflows/schema-evolution | эволюция схемы | Prisma Docs: Schema evolution
+- https://www.prisma.io/docs/orm/migrations/how-migrations-work | эволюция схемы | Prisma Docs: Schema evolution
 
 ## 17.2 Админ-роуты | short: /admin/* | est: ~25 мин
 ### intro

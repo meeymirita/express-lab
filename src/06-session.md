@@ -163,7 +163,7 @@ node perf-demo.js
 - Что показывает флейм-график, которого не видно в простом замере времени?
 
 ### links
-- https://nodejs.org/en/docs/guides/simple-profiling/ | профилирование Node | Node.js: Simple profiling
+- https://nodejs.org/learn/getting-started/profiling | профилирование Node | Node.js: Simple profiling
 
 ## 6.4 Утечка памяти: растущий кеш | short: Утечка памяти | est: ~25 мин
 ### intro
@@ -229,7 +229,7 @@ node bounded-cache-demo.js
 - Придумай свой пример места в ShareBox, где неограниченный кеш мог бы незаметно появиться.
 
 ### links
-- https://nodejs.org/en/docs/guides/diagnostics/memory/ | диагностика памяти в Node | Node.js: Memory diagnostics
+- https://nodejs.org/learn/diagnostics/memory | диагностика памяти в Node | Node.js: Memory diagnostics
 
 ## 6.5 🔨 Сломать → починить: необработанный reject роняет процесс | short: Сломать → починить | est: ~25 мин
 ### intro
