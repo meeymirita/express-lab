@@ -185,7 +185,10 @@ node --test test/auth.test.js
 
 **Файлы:** `Dockerfile`, `.dockerignore`.
 
+Структуру базы теперь ведут миграции Prisma (шаг 13.5), а не код при старте, поэтому контейнеру перед запуском нужен `prisma migrate deploy` — и CLI `prisma`, который до сих пор стоял в `devDependencies` и в образ с `npm ci --omit=dev` не попадает. `--save-prod` переносит его в обычные зависимости:
+
 ```bash run
+npm install --save-prod prisma@7
 cat > Dockerfile <<'EOF'
 FROM node:24-alpine AS base
 WORKDIR /app
@@ -201,7 +204,7 @@ COPY . .
 RUN npx prisma generate
 EXPOSE 3000
 USER node
-CMD ["node", "server.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
 EOF
 cat > .dockerignore <<'EOF'
 node_modules
@@ -257,6 +260,7 @@ services:
     environment:
       DATABASE_URL: postgresql://sharebox:sharebox@db:5432/sharebox
       JWT_SECRET: change-me-in-production
+    restart: on-failure
     depends_on:
       - db
     volumes:
@@ -283,7 +287,7 @@ sharebox.localhost {
 }
 ```
 
-**Разбор.** `DATABASE_URL` внутри `app` указывает на хост `db`, не `localhost` — в сети Docker Compose каждый сервис виден остальным **по имени сервиса** (service discovery), без IP-адресов. `depends_on` задаёт порядок запуска контейнеров, но **не** ждёт, пока Postgres реально будет готова принимать подключения (`migrate()` в `server.js`, сессия 12.6, сама переживёт пару неудачных попыток при старте — за пределами паспорта лабы можно добавить `healthcheck` и `condition: service_healthy`). Caddy перед `app` — тот же reverse proxy из Caddy Lab, но теперь не демонстрация, а настоящая точка входа ShareBox.
+**Разбор.** `DATABASE_URL` внутри `app` указывает на хост `db`, не `localhost` — в сети Docker Compose каждый сервис виден остальным **по имени сервиса** (service discovery), без IP-адресов. `depends_on` задаёт порядок запуска контейнеров, но **не** ждёт, пока Postgres реально будет готова принимать подключения (если база ещё не готова, `prisma migrate deploy` в `CMD` упадёт, и `restart: on-failure` перезапустит `app` — со второй-третьей попытки всё поднимется; аккуратнее то же делается через `healthcheck` и `condition: service_healthy`, но это за пределами паспорта лабы). Caddy перед `app` — тот же reverse proxy из Caddy Lab, но теперь не демонстрация, а настоящая точка входа ShareBox.
 
 ### why
 Три сервиса, одна команда `docker compose up`, вся система поднимается по имени сервисов, без ручной настройки сети — это и есть то, ради чего существует Compose: описать систему целиком одним файлом и повторяемо её поднимать, хоть у тебя на Mac, хоть на сервере.

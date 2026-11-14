@@ -42,7 +42,7 @@ app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 2
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s -o /dev/null -w 'boom: %{http_code}\n' http://localhost:3000/boom
 curl -s -o /dev/null -w 'boom-async: %{http_code}\n' http://localhost:3000/boom-async
 curl -s -o /dev/null -w 'нет такого пути: %{http_code}\n' http://localhost:3000/nope
@@ -106,7 +106,7 @@ app.post('/files', validate(createFileSchema), (req, res) => {
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s -X POST -H 'Content-Type: application/json' -d '{"name":"a.pdf","size":100}' http://localhost:3000/files
 echo
 curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' -d '{"name":"","size":-1}' http://localhost:3000/files
@@ -193,7 +193,7 @@ app.use(filesRoutes)
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s http://localhost:3000/health
 echo
 curl -s http://localhost:3000/files/1
@@ -249,8 +249,8 @@ app.listen(3600, () => console.log('broken-order на 3600'))
 EOF
 node broken-order.js &
 SERVER_PID=$!
-sleep 1
-curl -s -o /dev/null -w 'до починки: %{http_code}\n' http://localhost:3600/boom
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3600/ && break; sleep 0.2; done
+curl -s -o /dev/null -w 'до починки: %{http_code}, тип ответа: %{content_type}\n' http://localhost:3600/boom
 kill $SERVER_PID
 ```
 
@@ -276,8 +276,8 @@ app.listen(3601, () => console.log('fixed-order на 3601'))
 EOF
 node fixed-order.js &
 SERVER_PID=$!
-sleep 1
-curl -s -o /dev/null -w 'после починки: %{http_code}\n' http://localhost:3601/boom
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3601/ && break; sleep 0.2; done
+curl -s -o /dev/null -w 'после починки: %{http_code}, тип ответа: %{content_type}\n' http://localhost:3601/boom
 kill $SERVER_PID
 ```
 
@@ -286,10 +286,12 @@ kill $SERVER_PID
 ```
 
 ### why
+Обрати внимание: код ответа в обоих случаях `404` — его задаёт сам `NotFoundError`, а не наш обработчик, — поэтому смотрим на **тип ответа**: до починки это `text/html` (страница ошибки встроенного обработчика Express), после — `application/json` (наш `{"error":"caught", …}`).
+
 Express проходит middleware и роуты **по порядку регистрации**, сверху вниз — это не похоже на обычный JS, где порядок объявления функций обычно не важен, и легко забыть, когда в проекте уже десяток `app.use()`. Error handler, зарегистрированный раньше роута, который бросает ошибку, просто никогда до неё не доходит — она улетает дальше, во встроенный обработчик Express по умолчанию.
 
 ### quiz
-- Почему `/boom` до починки не получает `404` от своего собственного error handler?
+- Почему `/boom` до починки не получает JSON от своего собственного error handler (хотя код `404` тот же)?
 - В каком порядке Express проверяет middleware и роуты — по типу (сначала все роуты, потом все error handler'ы) или по порядку регистрации в коде?
 - Если в проекте несколько роутов в разных файлах (как в шаге 11.3), где физически должен стоять `app.use(errorHandler)` относительно всех `app.use(routes)`?
 

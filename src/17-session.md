@@ -150,7 +150,7 @@ app.listen(3000, () => console.log('демо-сервер слушает 3000'))
 EOF
 node rate-limit-demo.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 for i in 1 2 3 4 5; do
   curl -s -o /dev/null -w "запрос $i: %{http_code}\n" http://localhost:3000/s/anycode
 done
@@ -204,7 +204,7 @@ app.listen(3000, () => console.log('демо-сервер слушает 3000'))
 EOF
 node security-demo.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s -D - http://localhost:3000/check -o /dev/null | grep -iE 'x-content-type-options|x-frame-options|access-control'
 kill $SERVER_PID
 ```
@@ -275,7 +275,7 @@ export default router
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s http://localhost:3000/health
 echo
 curl -s http://localhost:3000/ready
@@ -302,7 +302,7 @@ process.on('SIGTERM', () => {
 EOF
 node shutdown-demo.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s http://localhost:3000/slow &
 sleep 0.3
 kill -TERM $SERVER_PID
@@ -359,10 +359,7 @@ import filesRoutes from './src/routes/files.routes.js'
 import authRoutes from './src/routes/auth.routes.js'
 import sharesRoutes from './src/routes/shares.routes.js'
 import adminRoutes from './src/routes/admin.routes.js'
-import { migrate } from './src/migrate.js'
 import { cleanupExpiredShares } from './src/services/cleanup.service.js'
-
-await migrate()
 
 const app = express()
 app.use(helmet())
@@ -395,7 +392,7 @@ process.on('SIGTERM', () => {
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s http://localhost:3000/health
 echo
 curl -s -o /dev/null -w 'admin без токена: %{http_code}\n' http://localhost:3000/admin/files

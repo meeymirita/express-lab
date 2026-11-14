@@ -68,7 +68,7 @@ app.listen(PORT, () => console.log(`ShareBox (Express) слушает порт $
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s http://localhost:3000/health
 echo
 curl -s http://localhost:3000/files/abc123
@@ -119,7 +119,7 @@ app.post('/echo', (req, res) => {
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s -X POST http://localhost:3000/echo -H 'Content-Type: application/json' -d '{"name":"ShareBox"}'
 echo
 curl -s -X POST http://localhost:3000/echo -d '{"name":"без заголовка"}'
@@ -181,7 +181,7 @@ app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+until node -e "require('net').connect(3000, 'localhost').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"; do sleep 0.2; done
 curl -s http://localhost:3000/health
 echo
 curl -s http://localhost:3000/health
@@ -239,7 +239,7 @@ app.get('/status-demo', (req, res) => {
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+until node -e "require('net').connect(3000, 'localhost').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"; do sleep 0.2; done
 curl -s http://localhost:3000/static/hello.html
 echo
 curl -s -o /dev/null -w 'код: %{http_code}\n' http://localhost:3000/status-demo
@@ -317,7 +317,7 @@ EOF
 npm install
 npm start &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s http://localhost:3000/health
 echo
 kill $SERVER_PID

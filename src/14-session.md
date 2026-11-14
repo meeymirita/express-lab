@@ -278,9 +278,6 @@ import express from 'express'
 import healthRoutes from './src/routes/health.routes.js'
 import filesRoutes from './src/routes/files.routes.js'
 import authRoutes from './src/routes/auth.routes.js'
-import { migrate } from './src/migrate.js'
-
-await migrate()
 
 const app = express()
 app.use(express.json())
@@ -299,7 +296,7 @@ app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 EMAIL="user-$(date +%s)@mail.com"
 curl -s -X POST http://localhost:3000/auth/register -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"supersecret123\"}"
 echo
@@ -320,6 +317,7 @@ kill $SERVER_PID
 ### deep Если не получилось
 - **`401` на `/auth/me` с токеном** — токен не передан в формате `Bearer <токен>` (с пробелом после `Bearer`), сверь заголовок.
 - **Регистрация успешна, вход — `401`** — пароль при регистрации и входе должен совпадать дословно; в примере оба `supersecret123`.
+- **`SyntaxError: Unexpected end of JSON input`** (и `000` вместо кода ответа) — запрос ушёл раньше, чем сервер начал слушать порт: `curl -s` молча получает «соединение отклонено», в `node -e` приходит пустая строка, и `JSON.parse('')` падает. Поэтому после `node server.js &` в блоках стоит не «подождать секунду», а цикл `for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done` — он повторяет запрос, пока сервер не ответит (любым кодом), но не дольше 10 секунд. Если пишешь свой скрипт — делай так же: фиксированный `sleep` на медленной машине (или при первом старте контейнера, пока грузятся Prisma и `argon2`) рано или поздно не успевает. Если и цикл не помог, сервер упал при старте: запусти `node server.js` без `&` и прочитай ошибку.
 
 ### quiz
 - Что делает `requireAuth`, если заголовок `Authorization` отсутствует вообще?
@@ -359,7 +357,7 @@ sed -i.bak "/router.post('\/auth\/login', login)/a router.post('/auth/refresh', 
 rm -f src/routes/auth.routes.js.bak
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 EMAIL="user-$(date +%s)@mail.com"
 curl -s -X POST http://localhost:3000/auth/register -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"supersecret123\"}" > /dev/null
 LOGIN=$(curl -s -X POST http://localhost:3000/auth/login -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"supersecret123\"}")
@@ -444,7 +442,7 @@ export default router
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 EMAIL_A="owner-$(date +%s)@mail.com"
 EMAIL_B="stranger-$(date +%s)@mail.com"
 curl -s -X POST http://localhost:3000/auth/register -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL_A\",\"password\":\"supersecret123\"}" > /dev/null

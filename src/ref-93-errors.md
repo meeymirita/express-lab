@@ -26,7 +26,7 @@
 | повторный `POST` создал вторую сущность вместо одной | идемпотентный ключ не проверен **до** вычисления/записи | `if (seen.has(key)) return seen.get(key)` — раньше, чем сама операция |
 | `Error validating datasource` / `URL is no longer supported` (Prisma 7) | в `schema.prisma` остался `url = env(...)` в `datasource` | убери `url` из схемы — он теперь только в `prisma7.config.ts` |
 | `Unknown arg 'include' in ...` (Prisma) | связь не описана в схеме под этим именем | сверь имя связи точно как в `schema.prisma` |
-| `Drift detected` при `prisma migrate dev` | таблицы уже существуют (созданы сырым SQL), а история миграций Prisma пустая | для учебной базы: `npx prisma migrate reset --force` |
+| `Drift detected` при `prisma migrate dev` | таблицы создал кто-то другой, не миграции Prisma: сырой SQL (`schema.sql`, `migrate()` в `server.js`) или старая база; история миграций не совпадает с базой | для учебной базы: `npx prisma migrate reset --force`, затем убрать из `server.js` вызов `migrate()` (шаг 13.5): структуру базы ведёт только Prisma |
 | `PrismaClientValidationError` при поиске по `id` | `id` из `req.params` — строка, а поле в схеме — `Int` | приведи тип: `Number(id)` |
 | `JsonWebTokenError: invalid signature` | токен подписан другим `JWT_SECRET` | ожидаемо для «чужого» токена; для «своего» — сверь секрет |
 | `401` на защищённом роуте с токеном | заголовок не в формате `Bearer <токен>` (с пробелом) | `Authorization: Bearer ${TOKEN}` |
@@ -35,7 +35,7 @@
 | `ECONNREFUSED 127.0.0.1:5432` | Postgres не запущена | `docker compose up -d`, проверь `docker compose ps` |
 | `password authentication failed` (Postgres) | пользователь/пароль в `DATABASE_URL` не совпадают с `POSTGRES_USER`/`PASSWORD` | сверь оба места дословно |
 | `relation "x" already exists` | схема уже создавалась раньше — нормально при повторном прохождении (том пережил перезапуск) | для чистого листа: `docker compose down -v` |
-| `relation "x" does not exist` при старте сервера | миграция/создание схемы не вызвано до роутов | проверь, что `migrate()` вызывается первым в `server.js` |
+| `relation "x" does not exist` при старте сервера | миграция/создание схемы не вызвано до роутов | до сессии 13: `migrate()` вызывается первым в `server.js`; с сессии 13: примени миграции командой `npx prisma migrate deploy` |
 | пул соединений «кончился», запросы зависают (`pg`) | `client.release()` не вызван после запроса, особенно при ошибке | оборачивай `release()` в `finally` |
 | `Cannot find module '/work/x/test'` при `node --test test/` | в Node 24 аргумент-путь после `--test` ломает автопоиск тестов | запускай `node --test` без аргумента, или укажи конкретный файл |
 | `ECONNREFUSED` внутри теста (supertest) | в тест передан URL строкой вместо объекта приложения | `request(app)`, а не `request('http://localhost:3000')` |

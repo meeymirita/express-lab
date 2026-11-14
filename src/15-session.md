@@ -28,7 +28,7 @@ app.listen(3000, () => console.log('демо-сервер слушает 3000'))
 EOF
 node upload-demo.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 echo "содержимое тестового файла" > test-upload.txt
 curl -s -F "file=@test-upload.txt" http://localhost:3000/upload-demo
 echo
@@ -88,7 +88,7 @@ app.listen(3000, () => console.log('демо-сервер слушает 3000'))
 EOF
 node upload-limit-demo.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 head -c $((210 * 1024 * 1024)) /dev/urandom > too-big.bin
 curl -s -o /dev/null -w 'файл 210 МБ: %{http_code}\n' -F "file=@too-big.bin" http://localhost:3000/upload-demo
 rm -f too-big.bin
@@ -322,7 +322,7 @@ export default router
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 EMAIL="uploader-$(date +%s)@mail.com"
 curl -s -X POST http://localhost:3000/auth/register -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"supersecret123\"}" > /dev/null
 TOKEN=$(curl -s -X POST http://localhost:3000/auth/login -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"supersecret123\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).access))")
@@ -430,7 +430,7 @@ EOF
 head -c 100000 /dev/urandom > uploads-range-demo.bin
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s -o /dev/null -w 'без Range: %{http_code}, размер: %{size_download}\n' http://localhost:3000/range-demo
 curl -s -o /dev/null -w 'с Range 0-999: %{http_code}, размер: %{size_download}\n' -H 'Range: bytes=0-999' http://localhost:3000/range-demo
 kill $SERVER_PID

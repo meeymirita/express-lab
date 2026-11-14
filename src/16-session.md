@@ -323,7 +323,7 @@ sed -i.bak "/app.use(authRoutes)/a app.use(sharesRoutes)" server.js
 rm -f server.js.bak
 node server.js &
 SERVER_PID=$!
-sleep 2
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 EMAIL="sharer-$(date +%s)@mail.com"
 curl -s -X POST http://localhost:3000/auth/register -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"supersecret123\"}" > /dev/null
 TOKEN=$(curl -s -X POST http://localhost:3000/auth/login -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"supersecret123\"}" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).access))")

@@ -387,7 +387,7 @@ app.listen(PORT, () => console.log(`ShareBox слушает порт ${PORT}`))
 EOF
 node server.js &
 SERVER_PID=$!
-sleep 1
+for i in $(seq 50); do curl -s -o /dev/null http://localhost:3000/ && break; sleep 0.2; done
 curl -s http://localhost:3000/health
 echo
 curl -s -o /dev/null -w 'несуществующий файл по id из базы: %{http_code}\n' http://localhost:3000/files/999999
